@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# 從 Google Drive 下載資料到 data/ 與 runs/。已下載且大小正確的檔案會略過。
+# 從 Google Drive 下載資料到 data/。已下載且大小正確的檔案會略過。
 # 用法：bash scripts/get_data.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
-mkdir -p data runs
+mkdir -p data
 
 # 檔案 ID | 存放位置 | 正確大小（bytes）
 FILES="
 1ZQWnbZ3nstTmFiJw45pMR5ROqi_rxWam data/tau2_bench.balanced.jsonl 21305014
 1mgGGrSrKvsFAMYrrFqG3ujypwuO3QitY data/swebench_verified.balanced.jsonl 16840909
 1NRqyuEredqz19MCZSwHfuNhOXcOHUflw data/agentrewardbench.balanced.jsonl 75226900
-1168GyW_ptIFJFAJYnTaxZMURa0y6DyA5 runs/musique_dev_prompts.jsonl 27468551
 "
 
 size() { [ -f "$1" ] && wc -c < "$1" | tr -d ' ' || echo 0; }

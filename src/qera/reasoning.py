@@ -67,15 +67,3 @@ def from_message(msg: dict[str, Any]) -> str:
             seen.add(p)
             out.append(p)
     return "\n\n".join(out)
-
-
-def from_object(msg: Any) -> str:
-    """同 from_message，但輸入是 openai 套件回傳的物件（run_solver 用）。"""
-    d: dict[str, Any] = {}
-    for key in ("reasoning_content", "reasoning", "thinking", "thinking_blocks"):
-        val = getattr(msg, key, None)
-        if val is None:
-            val = (getattr(msg, "model_extra", None) or {}).get(key)
-        if val is not None:
-            d[key] = val
-    return from_message(d)

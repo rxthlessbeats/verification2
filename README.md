@@ -13,7 +13,7 @@ bash scripts/get_data.sh
 uv run pytest -q
 ```
 
-`get_data.sh` 會把資料下載到 `data/`、`runs/`，最後應顯示「錯誤 0 筆」；`pytest` 應顯示 56 passed。
+`get_data.sh` 會把資料下載到 `data/`，最後應顯示「錯誤 0 筆」；`pytest` 應顯示 38 passed。
 
 資料來源：[Google Drive](https://drive.google.com/drive/folders/1-Ahl5K9TkI4Ir_7RcduF9zjQ_TaF-GyK?usp=sharing)（不進 git）。
 
@@ -21,14 +21,13 @@ uv run pytest -q
 
 ### 資料
 
-| 檔案 | 內容 |
-|---|---|
-| `data/tau2_bench.balanced.jsonl` | τ²-Bench，正確 / 錯誤各 250 |
-| `data/swebench_verified.balanced.jsonl` | SWE-bench Verified，各 82 |
-| `data/agentrewardbench.balanced.jsonl` | AgentRewardBench，各 250 |
-| `runs/musique_dev_prompts.jsonl` | MuSiQue solver prompt，2,417 題 |
+| Benchmark | 類型 | 狀態 | 檔案 |
+|---|---|---|---|
+| τ²-Bench | 工具使用 | ✅ 可用，正確 / 錯誤各 250 | `data/tau2_bench.balanced.jsonl` |
+| SWE-bench Verified | 軟體工程 | ✅ 可用，各 82 | `data/swebench_verified.balanced.jsonl` |
+| AgentRewardBench | 網頁操作 | ✅ 可用，各 250 | `data/agentrewardbench.balanced.jsonl` |
 
-BrowseComp-Plus 等 judge 產生標籤、MuSiQue 等 solver。各 benchmark 說明見 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)，QERA 切分規則見 [`docs/SPEC.md`](docs/SPEC.md)。
+組上決定只用這 3 個 benchmark（MuSiQue、BrowseComp-Plus、AppWorld 已移除）。各 benchmark 說明見 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)，QERA 切分規則見 [`docs/SPEC.md`](docs/SPEC.md)。
 
 ### 接口用法
 
@@ -53,12 +52,6 @@ for traj in read_jsonl(["data/tau2_bench.balanced.jsonl"]):
 | `uv run qera apply-overrides data/x.jsonl overrides/kai.jsonl --out data/x.v2.jsonl` | 套用 Jev 分類 |
 | `uv run qera sample data/full/x.jsonl --per-class 250 --out data/x.balanced.jsonl` | 重新抽樣 |
 
-### Solver / Judge 的輸出格式
-
-`scripts/run_solver.py`、`scripts/judge_bcp.py` 會把模型輸出存成統一格式。
-模型需透過 vLLM 的 OpenAI 相容接口提供，並開啟 `--reasoning-parser`，R 才會被記錄。
-`scripts/carc_solver.slurm` 是 CARC 上的參考範本。
-
 ### 從頭重建資料（通常不需要）
 
 ```bash
@@ -71,4 +64,3 @@ uv run bash scripts/convert_all.sh
 ### 注意
 
 - 資料檔不要 commit（`.gitignore` 已排除）。
-- BrowseComp-Plus 資料規定不得公開明文，`raw/`、`judgments/` 不要強制加入。

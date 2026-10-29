@@ -1,7 +1,7 @@
 """JSONL 讀取。
 
 不要用 str.splitlines()：它會把 U+2028、U+2029、\x85 等 Unicode 字元也當成換行，
-模型輸出裡常有這些字元（例如 BrowseComp-Plus 的 o3 run 檔），會把一筆資料切成兩半。
+模型輸出裡常有這些字元，會把一筆資料切成兩半。
 JSONL 的分隔只有 "\n"。
 """
 

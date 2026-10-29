@@ -7,7 +7,6 @@ test_adapters.py 驗證的是「轉換結果的格式」；這裡驗證的是「
 - 失敗不會被吞掉、不會留下半個檔案
 """
 
-import importlib.util
 import json
 from collections import Counter
 from pathlib import Path
@@ -16,22 +15,14 @@ from types import SimpleNamespace as NS
 import pytest
 
 from qera import cli, reasoning
-from qera.adapters import agentrewardbench, browsecomp_plus, musique, swebench, tau2
+from qera.adapters import agentrewardbench, swebench, tau2
 from qera.builder import TrajectoryBuilder
 from qera.overrides import apply, load_overrides
 from qera.render import CONDITIONS, build_verifier_input, e_candidates, selector_view
 from qera.schema import Label, Role, SolverInfo
 
 FX = Path(__file__).parent / "fixtures"
-ROOT = Path(__file__).resolve().parent.parent
 SENTINEL = "ZZ_GOLD_SENTINEL_42"
-
-
-def _load_script(name):
-    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def _toy(label=True, with_spans=False):
@@ -206,21 +197,6 @@ def test_unclosed_think_is_reasoning_not_answer():
         "<think>unfinished internal reasoning"
     )
     assert think == "unfinished internal reasoning" and rest == "" and unclosed
-    ex = json.loads((FX / "musique_dev.jsonl").read_text().splitlines()[0])
-    run = {
-        "id": ex["id"],
-        "model": "q",
-        "meta": {"finish_reason": "length"},
-        "messages": [
-            {
-                "role": "assistant",
-                "content": "<think>the founder might be Ada Brightwater",
-            }
-        ],
-    }
-    t = musique.convert_one(ex, run, "dev", "full")
-    assert t.meta["incomplete"] and t.by_role("A")[0].text == "(no answer)"
-    assert "Ada Brightwater" in t.by_role("R")[0].text
 
 
 def test_declared_reasoning_is_checked_against_content():
@@ -367,64 +343,6 @@ def test_tau2_inline_think_becomes_reasoning(tmp_path):
     assert all("<think>" not in s.text for s in t.segments)
 
 
-def test_musique_preserves_prompt_order():
-    ex = json.loads((FX / "musique_dev.jsonl").read_text().splitlines()[0])
-    t = musique.convert_one(ex, {"id": ex["id"], "answer": "x"}, "dev", "full")
-    kinds = [s.kind for s in t.segments]
-    assert kinds.index("question") > max(
-        i for i, k in enumerate(kinds) if k == "passage"
-    )  # 段落在前、問題在後
-
-
-# ════════════════════════════════════════════════════════════════════
-# judge 標籤
-# ════════════════════════════════════════════════════════════════════
-
-
-def test_judge_verdict_parsing():
-    j = _load_script("judge_bcp")
-    assert j.parse_verdict("incorrect: yes\ncorrect: no") == ("ok", False)
-    assert j.parse_verdict("reasoning: it says correct: yes\ncorrect: no") == (
-        "ok",
-        False,
-    )
-    assert j.parse_verdict("**correct:** yes") == ("ok", True)
-    assert j.parse_verdict("correct: yes\ncorrect: no")[0] == "parse_error"  # 互相矛盾
-    assert j.parse_verdict("no verdict here")[0] == "parse_error"
-    assert j.parse_verdict("<think>correct: yes</think>\ncorrect: no") == ("ok", False)
-
-
-def test_judgment_must_match_answer(tmp_path):
-    run = json.loads((FX / "bcp_run.jsonl").read_text())
-    good = {
-        "run_tag": "gpt-5",
-        "query_id": "9001",
-        "status": "ok",
-        "correct": True,
-        "candidate_hash": browsecomp_plus.candidate_hash(
-            browsecomp_plus.final_output_text(run)
-        ),
-    }
-    stale = dict(good, candidate_hash="0000000000000000")  # 判決對應的是另一個答案
-    other_run = dict(good, run_tag="o3@bm25")  # 判決屬於另一條 run
-    for j, expect in [(good, True), (stale, None), (other_run, None)]:
-        p = tmp_path / "j.jsonl"
-        p.write_text(json.dumps(j) + "\n")
-        (t,) = list(
-            browsecomp_plus.run(
-                NS(
-                    queries=str(FX / "bcp_queries.jsonl"),
-                    runs=str(FX / "bcp_run.jsonl"),
-                    judgments=str(p),
-                    qrels_evidence=None,
-                    qrels_gold=None,
-                    native_reasoning="summary",
-                )
-            )
-        )
-        assert t.label.correct is expect, j
-
-
 # ════════════════════════════════════════════════════════════════════
 # 抽樣與批次流程
 # ════════════════════════════════════════════════════════════════════
@@ -486,27 +404,6 @@ def test_write_is_atomic(tmp_path):
 # ════════════════════════════════════════════════════════════════════
 # solver 續跑
 # ════════════════════════════════════════════════════════════════════
-
-
-def test_solver_resume_identity_and_corrupt_tail(tmp_path, monkeypatch):
-    rs = _load_script("run_solver")
-    from tests.test_run_solver import FakeClient, _run
-
-    client = FakeClient()
-    out, _ = _run(tmp_path, monkeypatch, client)
-    # 模擬中斷：最後一行寫到一半
-    lines = out.read_text().splitlines()
-    out.write_text(lines[0] + "\n" + lines[1][:30])
-    c2 = FakeClient()
-    _run(tmp_path, monkeypatch, c2)
-    assert c2.calls == 1  # 只補跑壞掉的那題
-    assert all(
-        json.loads(l) for l in out.read_text().splitlines()
-    )  # 檔案恢復成全部合法
-    # 換了生成參數卻用同一個輸出檔 → 停止
-    with pytest.raises(SystemExit, match="不同設定"):
-        _run(tmp_path, monkeypatch, FakeClient(), extra=("--temperature", "0.9"))
-    del rs
 
 
 def test_a_old_schema_rejected_by_read_and_validate(tmp_path, capsys):
@@ -630,66 +527,6 @@ def test_d_selector_answer_preserves_calls_and_text_order():
     assert "tool_result_between_action_and_reply" not in answer
 
 
-@pytest.mark.parametrize("tail", ['\n{"run_tag": "partial', ""])
-def test_e_judge_resume_repairs_tail_before_append(tmp_path, monkeypatch, tail):
-    j = _load_script("judge_bcp")
-    old = {
-        "run_tag": "old",
-        "query_id": "old",
-        "status": "ok",
-        "correct": False,
-        "candidate_hash": "x",
-    }
-    out = tmp_path / "judgments.jsonl"
-    out.write_text(json.dumps(old) + tail)
-    import openai
-
-    client = NS(
-        chat=NS(
-            completions=NS(
-                create=lambda **kw: NS(
-                    choices=[
-                        NS(message=NS(content="correct: yes"), finish_reason="stop")
-                    ]
-                )
-            )
-        )
-    )
-    monkeypatch.setattr(openai, "OpenAI", lambda **kw: client)
-    j.main(
-        [
-            "--queries",
-            str(FX / "bcp_queries.jsonl"),
-            "--runs",
-            str(FX / "bcp_run.jsonl"),
-            "--out",
-            str(out),
-        ]
-    )
-    labels = browsecomp_plus.load_judgments(str(out))
-    assert len(labels) == 2
-    assert labels[("old", "old")]["correct"] is False
-    assert out.read_bytes().endswith(b"\n")
-    assert not list(tmp_path.glob("*.tmp"))
-
-
-def test_f_solver_retry_preserves_records_outside_items(tmp_path, monkeypatch):
-    from tests.test_run_solver import FakeClient, _run
-
-    out, _ = _run(tmp_path, monkeypatch, FakeClient())
-    rows = [json.loads(line) for line in out.read_text().splitlines()]
-    rows[1]["meta"]["warnings"] = ["truncated"]
-    out.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    ids = tmp_path / "ids.txt"
-    ids.write_text(rows[0]["id"] + "\n")
-    client = FakeClient()
-    _run(tmp_path, monkeypatch, client, extra=("--ids", str(ids), "--retry-incomplete"))
-    after = {row["id"]: row for row in map(json.loads, out.read_text().splitlines())}
-    assert len(after) == 2
-    assert after[rows[1]["id"]] == rows[1]
-    assert client.calls == 1
-
-
 def test_g_unmatched_override_preserves_same_input_output(tmp_path):
     p = tmp_path / "same.jsonl"
     cli.write_jsonl([_toy()], str(p))
@@ -712,7 +549,7 @@ def test_g_unmatched_override_preserves_same_input_output(tmp_path):
     assert not (tmp_path / "same.jsonl.tmp").exists()
 
 
-@pytest.mark.parametrize("adapter", ["chat", "swebench", "tau2"])
+@pytest.mark.parametrize("adapter", ["swebench", "tau2"])
 def test_h_reversed_tool_results_are_detected(adapter, tmp_path, capsys):
     if adapter == "tau2":
         messages = [
@@ -764,32 +601,17 @@ def test_h_reversed_tool_results_are_detected(adapter, tmp_path, capsys):
             {"role": "tool", "tool_call_id": "x", "content": "result X"},
             {"role": "assistant", "content": "done"},
         ]
-        if adapter == "chat":
-            from qera.chat import add_chat_messages
-
-            b = TrajectoryBuilder()
-            b.add("Q", "user", "question", "task")
-            add_chat_messages(b, messages, is_final_action=lambda name, args: True)
-            t = b.build(
-                traj_id="chat.order",
-                benchmark="chat",
-                domain="tool_use",
-                task_id="1",
-                solver=SolverInfo(model="m"),
-                label=Label(correct=True, source="unit_tests"),
+        p = tmp_path / "order.traj.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "messages": [{"role": "user", "content": "task"}]
+                    + messages
+                    + [{"role": "exit", "extra": {"submission": "patch"}}]
+                }
             )
-        else:
-            p = tmp_path / "order.traj.json"
-            p.write_text(
-                json.dumps(
-                    {
-                        "messages": [{"role": "user", "content": "task"}]
-                        + messages
-                        + [{"role": "exit", "extra": {"submission": "patch"}}]
-                    }
-                )
-            )
-            t = swebench.convert_traj(str(p), True, "m", "none")
+        )
+        t = swebench.convert_traj(str(p), True, "m", "none")
     results = [s for s in t.segments if s.text in ("result Y", "result X")]
     assert [s.text for s in results] == ["result Y", "result X"]  # 只偵測，不重排。
     assert t.meta["call_order_changed"] == 1
@@ -847,42 +669,3 @@ def test_i_qea_without_selection_preserves_all_evidence():
         assert candidate["text"] in vi.text
         assert candidate["call"] in vi.text
     assert vi.tokens_by_role["E"] == t.tokens_by_role()["E"]
-
-
-def test_ii_solver_failure_exits_preserves_success_and_resumes(
-    tmp_path, monkeypatch, capsys
-):
-    from tests.test_run_solver import FakeClient, _run, run_solver
-
-    exs = [
-        json.loads(line) for line in (FX / "musique_dev.jsonl").read_text().splitlines()
-    ]
-    bad_prompt = musique.make_solver_prompt(exs[1])
-
-    class PartlyFailingClient(FakeClient):
-        def __init__(self):
-            super().__init__()
-            self.failed_calls = 0
-
-        def _create(self, **kw):
-            if kw["messages"][0]["content"] == bad_prompt:
-                self.failed_calls += 1
-                raise RuntimeError("persistent fixture failure")
-            return super()._create(**kw)
-
-    monkeypatch.setattr(run_solver.time, "sleep", lambda seconds: None)
-    client = PartlyFailingClient()
-    with pytest.raises(SystemExit) as e:
-        _run(tmp_path, monkeypatch, client)
-    assert e.value.code not in (None, 0)
-    assert "重跑同一行指令即可補上失敗的題目" in capsys.readouterr().out
-    out = tmp_path / "runs" / "musique.fake.jsonl"
-    successful = [json.loads(line) for line in out.read_text().splitlines()]
-    assert len(successful) == 1 and successful[0]["id"] == exs[0]["id"]
-    assert client.calls == 1 and client.failed_calls == 5
-    recovered = FakeClient()
-    _run(tmp_path, monkeypatch, recovered)
-    rows = {row["id"]: row for row in map(json.loads, out.read_text().splitlines())}
-    assert set(rows) == {ex["id"] for ex in exs}
-    assert rows[exs[0]["id"]] == successful[0]
-    assert recovered.calls == 1

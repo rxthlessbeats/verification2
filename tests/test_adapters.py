@@ -9,9 +9,6 @@ from types import SimpleNamespace as NS
 
 from qera.adapters import (
     agentrewardbench,
-    appworld,
-    browsecomp_plus,
-    musique,
     swebench,
     tau2,
 )
@@ -60,85 +57,6 @@ def _check(ts):
         _no_leak(t)
         _conditions_ok(t)
     return ts
-
-
-def test_musique():
-    ts = _check(
-        list(
-            musique.run(
-                NS(
-                    data=str(FX / "musique_dev.jsonl"),
-                    runs=str(FX / "musique_runs.jsonl"),
-                    split="dev",
-                    native_reasoning="full",
-                    export_prompts=None,
-                )
-            )
-        )
-    )
-    a, b = ts
-    assert a.label.correct is True and b.label.correct is False
-    assert a.meta["hop_count"] == 2 and b.meta["hop_count"] == 3
-    assert a.by_role("A")[0].text == "Ada Brightwater"
-    assert "Leeds?" in b.by_role("R")[0].text  # <think> 進 R
-    assert [s.hidden["is_supporting"] for s in a.by_role("E")] == [True, True, False]
-
-
-def test_musique_export_prompts(tmp_path):
-    out = tmp_path / "p.jsonl"
-    list(
-        musique.run(
-            NS(
-                data=str(FX / "musique_dev.jsonl"),
-                runs=None,
-                split="dev",
-                native_reasoning="full",
-                export_prompts=str(out),
-            )
-        )
-    )
-    p = json.loads(out.read_text().splitlines()[0])
-    assert (
-        "Paragraph 1: Title: Zephyr kettle" in p["prompt"] and "Answer:" in p["prompt"]
-    )
-    assert "is_supporting" not in p["prompt"]
-
-
-def test_browsecomp_plus():
-    (t,) = _check(
-        list(
-            browsecomp_plus.run(
-                NS(
-                    queries=str(FX / "bcp_queries.jsonl"),
-                    runs=str(FX / "bcp_run.jsonl"),
-                    judgments=str(FX / "bcp_judgments.jsonl"),
-                    qrels_evidence=str(FX / "bcp_qrel_evidence.txt"),
-                    qrels_gold=None,
-                    native_reasoning="summary",
-                )
-            )
-        )
-    )
-    assert t.label.correct is True and t.label.source == "llm_judge"
-    (e,) = t.by_role("E")
-    assert e.call.name == "search" and e.hidden["evidence_hits"] == ["111"]
-    assert "Exact Answer: Leeds" in t.by_role("A")[0].text
-
-
-def test_browsecomp_plus_pending_label():
-    (t,) = list(
-        browsecomp_plus.run(
-            NS(
-                queries=str(FX / "bcp_queries.jsonl"),
-                runs=str(FX / "bcp_run.jsonl"),
-                judgments=None,
-                qrels_evidence=None,
-                qrels_gold=None,
-                native_reasoning="summary",
-            )
-        )
-    )
-    assert t.label.correct is None and t.label.source == "pending"
 
 
 def test_tau2_real_sample():
@@ -219,31 +137,6 @@ def test_agentrewardbench():
     assert [s.kind for s in acts] == ["action", "final_answer"]
     assert t.by_role("R")[0].text.startswith("I should search")
     assert "searchbox" in t.by_role("E")[0].text
-
-
-def test_appworld_code_agent():
-    (t,) = _check(
-        list(
-            appworld.run(
-                NS(
-                    experiment=str(FX / "appworld_exp" / "fixture_agent"),
-                    dataset="dev",
-                    data_root=str(FX / "appworld_data"),
-                    model="fixture-model",
-                    native_reasoning="none",
-                )
-            )
-        )
-    )
-    assert t.label.correct is True
-    assert (
-        t.segments[0].text.startswith("Pay back Alex")
-        and "Supervisor: Sam Lee" in t.segments[0].text
-    )
-    es = t.by_role("E")
-    assert len(es) == 2 and es[0].call.name == "python" and es[0].ambiguous  # 有註解
-    assert {s.kind for s in t.by_role("A")} == {"final_answer", "state_diff"}
-    assert any("First I'll look up Alex" in s.text for s in t.by_role("R"))
 
 
 def test_overrides_and_greeting(tmp_path):
@@ -328,46 +221,11 @@ def test_tau2_reasoning_from_raw_data(tmp_path):
 
 
 def test_jsonl_unicode_line_separator(tmp_path):
-    """模型輸出含 U+2028 時，JSONL 不能被切成兩行（BrowseComp-Plus o3 run 檔的真實情況）。"""
-    run = json.loads((FX / "bcp_run.jsonl").read_text())
-    run["result"][-1]["output"] = (
-        "Explanation: line one line two end\x85x\nExact Answer: Leeds"
-    )
-    p = tmp_path / "o3.jsonl"
-    p.write_text(json.dumps(run, ensure_ascii=False) + "\n", encoding="utf-8")
-    assert " " in p.read_text(encoding="utf-8")
-    (t,) = list(
-        browsecomp_plus.run(
-            NS(
-                queries=str(FX / "bcp_queries.jsonl"),
-                runs=str(p),
-                judgments=None,
-                qrels_evidence=None,
-                qrels_gold=None,
-                native_reasoning="summary",
-            )
-        )
-    )
-    assert "line two" in t.by_role("A")[0].text
-    assert t.solver.model == "gpt-5"  # 有 metadata 時用 metadata
+    """模型輸出含 U+2028 等字元時，JSONL 不能被切成兩筆。"""
+    from qera import jsonl
 
-
-def test_bcp_model_from_path(tmp_path):
-    run = json.loads((FX / "bcp_run.jsonl").read_text())
-    run.pop("metadata")
-    d = tmp_path / "bm25"
-    d.mkdir()
-    (d / "o3.jsonl").write_text(json.dumps(run) + "\n")
-    (t,) = list(
-        browsecomp_plus.run(
-            NS(
-                queries=str(FX / "bcp_queries.jsonl"),
-                runs=str(d / "o3.jsonl"),
-                judgments=None,
-                qrels_evidence=None,
-                qrels_gold=None,
-                native_reasoning="summary",
-            )
-        )
-    )
-    assert t.solver.model == "o3@bm25"
+    p = tmp_path / "x.jsonl"
+    rec = {"output": "line one\u2028line two\x85end"}
+    p.write_text(json.dumps(rec, ensure_ascii=False) + "\n", encoding="utf-8")
+    assert "\u2028" in p.read_text(encoding="utf-8")
+    assert list(jsonl.read(p)) == [rec]

@@ -9,7 +9,7 @@
     python -m qera.cli retokenize data/x.jsonl --out data/x.qwen.jsonl   # 先設 QERA_TOKENIZER
     python -m qera.cli apply-overrides data/x.jsonl overrides/kai.jsonl --out data/x.v2.jsonl
 
-結束代碼（exit code）：0 = 成功；1 = 失敗；3 = 沒有可用標籤而略過（例如 BrowseComp-Plus 尚未跑 judge）。
+結束代碼（exit code）：0 = 成功；1 = 失敗；3 = 沒有可用標籤而略過。
 批次腳本 convert_all.sh 依這些代碼判斷要不要繼續。
 """
 
@@ -34,10 +34,7 @@ from .render import CONDITIONS, build_verifier_input, e_candidates, render_segme
 from .schema import SCHEMA_VERSION, Role, Trajectory
 
 ADAPTERS = {
-    "musique": "qera.adapters.musique",
-    "browsecomp_plus": "qera.adapters.browsecomp_plus",
     "tau2": "qera.adapters.tau2",
-    "appworld": "qera.adapters.appworld",
     "swebench": "qera.adapters.swebench",
     "agentrewardbench": "qera.adapters.agentrewardbench",
 }
@@ -322,7 +319,6 @@ def cmd_sample(args, _) -> None:
                 p.unlink()
         print(
             f"[sample] {args.file}：沒有可用的正確 / 錯誤配對，略過（排除原因：{dict(reasons)}）。"
-            "BrowseComp-Plus 要先跑 scripts/judge_bcp.py"
         )
         sys.exit(EXIT_NO_LABELS)
     if k_pairs < args.per_class:
