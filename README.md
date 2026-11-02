@@ -2,6 +2,8 @@
 
 USC EE599 Final Project：What Context Does a Verification Agent Really Need?
 
+Pipeline 对接已实现，运行步骤和当前缺少的真实模型/数据材料见 [PIPELINE_GUIDE.md](PIPELINE_GUIDE.md)。
+
 ## 安裝
 
 ```bash
