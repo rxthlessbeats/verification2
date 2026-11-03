@@ -1,2 +1,4 @@
 def main() -> None:
-    print("Hello from verification2!")
+    from .pipeline import main as run
+
+    run()
