@@ -38,10 +38,12 @@ from qera.cli import read_jsonl
 from qera.render import build_verifier_input, selector_view
 
 for traj in read_jsonl(["data/tau2_bench.balanced.jsonl"]):
-    traj.label.correct                                        # 標籤：True / False
-    build_verifier_input(traj, "QEA").text                    # 條件：QERA / QA / QEA
-    selector_view(traj)                                       # 給 Jev 的輸入（不含答案）
-    build_verifier_input(traj, "QEJevA", selected_e=seg_ids)  # Jev 選出的 E（seg_id 清單）
+    traj.label.correct  # 標籤：True / False
+    build_verifier_input(traj, "QEA").text  # 條件：QERA / QA / QEA
+    selector_view(traj)  # 給 Jev 的輸入（不含答案）
+    build_verifier_input(
+        traj, "QEJevA", selected_e=seg_ids
+    )  # Jev 選出的 E（seg_id 清單）
 ```
 
 ### 常用指令

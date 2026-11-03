@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
@@ -32,6 +33,7 @@ class UsageRecord:
 class UsageLedger:
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path or os.environ.get("JEV_USAGE_LOG", DEFAULT_LOG))
+        self._lock = threading.Lock()
 
     def record(
         self,
@@ -53,7 +55,7 @@ class UsageLedger:
             latency_s=latency_s,
             status=status,
         )
-        with self.path.open("a", encoding="utf-8") as f:
+        with self._lock, self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(rec)) + "\n")
         return rec
 
@@ -89,7 +91,9 @@ class UsageTotals:
         return self.latency_s / self.ok if self.ok else 0.0
 
 
-def summarize(records: Iterator[UsageRecord], group_by: str = "run") -> tuple[UsageTotals, dict[str, UsageTotals]]:
+def summarize(
+    records: Iterator[UsageRecord], group_by: str = "run"
+) -> tuple[UsageTotals, dict[str, UsageTotals]]:
     """Return overall totals and totals grouped by `run`, `day`, or `model`."""
     total = UsageTotals()
     groups: dict[str, UsageTotals] = defaultdict(UsageTotals)
@@ -100,7 +104,9 @@ def summarize(records: Iterator[UsageRecord], group_by: str = "run") -> tuple[Us
     return total, dict(groups)
 
 
-def format_table(total: UsageTotals, groups: dict[str, UsageTotals], group_by: str) -> str:
+def format_table(
+    total: UsageTotals, groups: dict[str, UsageTotals], group_by: str
+) -> str:
     rows = sorted(groups.items())
     w = max([len(group_by)] + [len(k) for k, _ in rows] + [5])
     head = f"{group_by:<{w}}  {'calls':>6} {'ok':>5} {'in_tok':>10} {'out_tok':>8} {'cost_usd':>10} {'lat_ms':>7}"

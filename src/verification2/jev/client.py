@@ -115,7 +115,9 @@ class JevClient:
                     200,
                 )
                 return result
-            self.ledger.record(self.model, self.run, 0, 0, 0.0, latency, resp.status_code)
+            self.ledger.record(
+                self.model, self.run, 0, 0, 0.0, latency, resp.status_code
+            )
             retryable = resp.status_code == 429 or resp.status_code >= 500
             if not retryable or attempt == self.max_retries:
                 raise JevError(f"gateway {resp.status_code}: {resp.text[:500]}")

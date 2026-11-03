@@ -1,24 +1,21 @@
-"""Jev-based evidence selection for verification agents."""
+"""Jev-based evidence selection for the QEsA condition.
 
-from verification2.jev.client import JevAnswer, JevClient, JevResult
-from verification2.jev.scorer import EvidenceScore, JevScorer
-from verification2.jev.select import (
-    EvidenceUnit,
-    jev_select,
-    random_select,
-    recency_select,
-    relevance_select,
-)
+Input is always ``qera.render.selector_view(traj)``; output is a selections
+JSONL that ``verification2 run --selector file`` consumes. Labels and hidden
+fields are never read.
+"""
+
+from verification2.jev.client import JevAnswer, JevClient, JevError, JevResult
+from verification2.jev.scorer import CandidateScore, JevScorer
+from verification2.jev.select import SelectionResult, select_for_view
 
 __all__ = [
-    "EvidenceScore",
-    "EvidenceUnit",
+    "CandidateScore",
     "JevAnswer",
     "JevClient",
+    "JevError",
     "JevResult",
     "JevScorer",
-    "jev_select",
-    "random_select",
-    "recency_select",
-    "relevance_select",
+    "SelectionResult",
+    "select_for_view",
 ]
