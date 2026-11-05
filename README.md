@@ -71,10 +71,12 @@ uv run bash scripts/convert_all.sh
 
 ## Jev evidence selection (Kai)
 
-Jev (TypeSafe, via Vercel AI Gateway) scores each E candidate from
-`selector_view` on whether it supports or contradicts the candidate answer,
-then packs the most useful candidates into the token budget. The output is a
-selections JSONL that `verification2 run --selector file` consumes.
+Jev (TypeSafe, via Vercel AI Gateway) asks one four-way question per E
+candidate from `selector_view`: is this evidence irrelevant, context,
+confirms the candidate answer, or refutes it? usefulness = P(confirms) +
+P(refutes). The most useful candidates are packed into the token budget. The
+output is a selections JSONL that `verification2 run --selector file`
+consumes; per-candidate probabilities land next to it in `*.scores.jsonl`.
 
 ```
 # .env: AI_GATEWAY_API_KEY=...

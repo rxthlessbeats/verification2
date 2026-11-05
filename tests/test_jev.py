@@ -58,6 +58,7 @@ class FakeScorer:
                     input_tokens=100,
                     cost_usd=4.2e-6,
                     latency_s=0.1,
+                    irrelevant=0.85 - contra if contra < 0.5 else 0.0,
                 )
             )
         return out
@@ -142,8 +143,16 @@ class FakeClient:
         return JevResult(
             model=self.model,
             answers={
-                "supports": JevAnswer("boolean", probability=0.1),
-                "contradicts": JevAnswer("boolean", probability=contra),
+                "role": JevAnswer(
+                    "choice",
+                    choice="refutes" if contra > 0.5 else "irrelevant",
+                    probabilities={
+                        "irrelevant": 0.85 - contra if contra < 0.5 else 0.0,
+                        "context": 0.05,
+                        "confirms": 0.1,
+                        "refutes": contra,
+                    },
+                ),
             },
             input_tokens=100,
             output_tokens=0,

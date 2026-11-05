@@ -1,17 +1,27 @@
 """Score one E candidate by how useful it is for verifying the candidate output.
 
-For each candidate we ask Jev two boolean questions in a single request:
-  supports    - does this evidence show the candidate output is correct?
-  contradicts - does this evidence show the candidate output is wrong?
-usefulness = max(P(supports), P(contradicts)). Evidence that bears on the
-verdict in either direction is worth keeping; evidence that does neither is
-noise. The scorer only ever sees question, answer and the candidate text.
+For each candidate we ask Jev one four-way choice question: what role does
+this single piece of evidence play for a verifier deciding whether the
+candidate output is correct? irrelevant / context / confirms / refutes.
+usefulness = P(confirms) + P(refutes). Evidence that bears on the verdict in
+either direction is worth keeping; exploration and background are noise.
+
+Two boolean questions (supports? contradicts?) were tried first and rejected:
+on tau2 nearly every tool result scored > 0.5 on "contradicts" because any
+record whose details differ from the one the agent acted on looked like a
+conflict. A single choice question forces the probability mass to be shared,
+and naming "other records the agent retrieved but did not use" as irrelevant
+fixed the ranking (probe: 20 tau2 + 10 SWE trajectories, 2026-11-04).
+
+The scorer only ever sees question, answer and the candidate text.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -29,10 +39,13 @@ MAX_STATE_TOKENS = 24_000
 # is looking at so "supports" and "contradicts" are interpreted correctly.
 TASK_HINTS: dict[str, str] = {
     "tau2_bench": (
-        "A customer-service agent handled a user's request by calling tools and replying. "
-        "The candidate output is the agent's replies and actions. It is correct if it follows "
-        "the policy and resolves the request; it is wrong if it violates policy, acts on wrong "
-        "data, or fails to resolve the request."
+        "A customer-service agent handled a user's request under the written policy included in "
+        "the task. The candidate output is the agent's replies and tool calls. It is correct when "
+        "every action and statement complies with the policy and matches the data returned by the "
+        "tools; declining a request or transferring to a human is correct whenever the policy "
+        "requires it. It is wrong only if the agent broke a policy rule, performed an action the "
+        "policy did not allow, acted on data that conflicts with the tool results, or told the user "
+        "something false."
     ),
     "swebench_verified": (
         "A coding agent was asked to fix an issue in a repository. The candidate output is the "
@@ -42,8 +55,12 @@ TASK_HINTS: dict[str, str] = {
     "agentrewardbench": (
         "A web agent was asked to complete a task in a browser. The candidate output is the "
         "sequence of actions and the final response. It is correct if the task was actually "
-        "completed as asked; it is wrong if the agent failed, did the wrong thing, or claimed "
-        "success without achieving it."
+        "completed as asked and the final response is accurate; it is wrong if the agent did the "
+        "wrong thing or claimed something the pages do not support. Each piece of evidence is one "
+        "page the agent saw. Search-engine home pages, blocked or CAPTCHA pages, loading pages and "
+        "other intermediate pages the output does not rely on are irrelevant, not refutations; a "
+        "page refutes the output only when its content disagrees with a specific claim in the "
+        "output or shows the task's final state was not reached."
     ),
 }
 DEFAULT_HINT = (
@@ -52,26 +69,33 @@ DEFAULT_HINT = (
 )
 
 QUESTIONS: dict[str, dict[str, Any]] = {
-    "supports": {
-        "type": "boolean",
+    "role": {
+        "type": "choice",
         "instructions": (
-            "Does this piece of evidence provide information showing that the candidate output "
-            "is correct for the task?"
+            "A verifier must decide whether the candidate output is correct for the task. "
+            "What role does this single piece of evidence play for that decision?"
         ),
         "criteria": {
-            "true": "the evidence contains facts that make the candidate output more likely to be correct",
-            "false": "the evidence is irrelevant to the candidate output, or does not bear on its correctness",
-        },
-    },
-    "contradicts": {
-        "type": "boolean",
-        "instructions": (
-            "Does this piece of evidence provide information showing that the candidate output "
-            "is wrong, incomplete, or violates the task requirements?"
-        ),
-        "criteria": {
-            "true": "the evidence contains facts that conflict with the candidate output or reveal an error in it",
-            "false": "the evidence is irrelevant to the candidate output, or does not conflict with it",
+            "irrelevant": (
+                "unrelated to the candidate output, or an exploratory lookup, search, file read, or "
+                "record the output does not depend on and does not act on; other records the agent "
+                "retrieved while searching but then did not use belong here even if their details "
+                "differ from the record the output acted on"
+            ),
+            "context": (
+                "related background that helps understand the task or the output, but neither "
+                "confirms nor refutes any specific claim or action in the output"
+            ),
+            "confirms": (
+                "directly confirms a specific fact, result, state, or action that the output relies "
+                "on or claims, such as a successful test, a tool result the output used correctly, "
+                "or a final state matching what the output says"
+            ),
+            "refutes": (
+                "directly shows a specific claim or action in the output is wrong, failed, violated "
+                "a rule, or disagrees with this evidence about the same record, file, or state; "
+                "describing a different record than the one the output acted on is not a refutation"
+            ),
         },
     },
 }
@@ -80,21 +104,24 @@ QUESTIONS: dict[str, dict[str, Any]] = {
 @dataclass(frozen=True)
 class CandidateScore:
     seg_id: int
-    supports: float
-    contradicts: float
+    supports: float  # P(confirms)
+    contradicts: float  # P(refutes)
     input_tokens: int  # Jev tokens billed for this call (0 on cache hit)
     cost_usd: float
     latency_s: float
+    irrelevant: float = 0.0
+    context: float = 0.0
     truncated: bool = False  # evidence was cut to fit Jev's context limit
     cached: bool = False
 
     @property
     def usefulness(self) -> float:
-        return max(self.supports, self.contradicts)
+        return min(1.0, self.supports + self.contradicts)
 
     @property
     def stance(self) -> str:
-        if self.usefulness < 0.5:
+        """Most likely role; irrelevant and context both read as neutral."""
+        if max(self.irrelevant, self.context) >= max(self.supports, self.contradicts):
             return "neutral"
         return "supports" if self.supports >= self.contradicts else "contradicts"
 
@@ -172,6 +199,8 @@ class JevScorer:
                 seg_id=candidate["seg_id"],
                 supports=cached["supports"],
                 contradicts=cached["contradicts"],
+                irrelevant=cached.get("irrelevant", 0.0),
+                context=cached.get("context", 0.0),
                 input_tokens=0,
                 cost_usd=0.0,
                 latency_s=0.0,
@@ -179,10 +208,13 @@ class JevScorer:
                 cached=True,
             )
         result = self.client.decide(state, QUESTIONS)
+        p = result.answers["role"].probabilities
         score = CandidateScore(
             seg_id=candidate["seg_id"],
-            supports=float(result.answers["supports"].probability or 0.0),
-            contradicts=float(result.answers["contradicts"].probability or 0.0),
+            supports=float(p.get("confirms", 0.0)),
+            contradicts=float(p.get("refutes", 0.0)),
+            irrelevant=float(p.get("irrelevant", 0.0)),
+            context=float(p.get("context", 0.0)),
             input_tokens=result.input_tokens,
             cost_usd=result.cost_usd,
             latency_s=result.latency_s,
@@ -202,8 +234,20 @@ class JevScorer:
         if not self.cache_dir:
             return None
         p = self.cache_dir / f"{key}.json"
-        return json.loads(p.read_text()) if p.exists() else None
+        try:
+            return json.loads(p.read_text())
+        except FileNotFoundError:
+            return None
+        except json.JSONDecodeError:
+            # Partial or corrupt entry (e.g. interrupted write): treat as a miss and rescore.
+            return None
 
     def _write_cache(self, key: str, score: CandidateScore) -> None:
-        if self.cache_dir:
-            (self.cache_dir / f"{key}.json").write_text(json.dumps(asdict(score)))
+        if not self.cache_dir:
+            return
+        # Atomic replace: identical candidates in one trajectory are scored concurrently,
+        # and a reader must never see a half-written file.
+        final = self.cache_dir / f"{key}.json"
+        tmp = self.cache_dir / f"{key}.{os.getpid()}.{threading.get_ident()}.tmp"
+        tmp.write_text(json.dumps(asdict(score)))
+        os.replace(tmp, final)

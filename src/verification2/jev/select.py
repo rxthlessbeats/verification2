@@ -61,6 +61,8 @@ class SelectionResult:
                 "seg_id": s.seg_id,
                 "supports": s.supports,
                 "contradicts": s.contradicts,
+                "irrelevant": s.irrelevant,
+                "context": s.context,
                 "usefulness": s.usefulness,
                 "stance": s.stance,
                 "selected": s.seg_id in chosen,
