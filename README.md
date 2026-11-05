@@ -38,10 +38,12 @@ from qera.cli import read_jsonl
 from qera.render import build_verifier_input, selector_view
 
 for traj in read_jsonl(["data/tau2_bench.balanced.jsonl"]):
-    traj.label.correct                                        # 標籤：True / False
-    build_verifier_input(traj, "QEA").text                    # 條件：QERA / QA / QEA
-    selector_view(traj)                                       # 給 Jev 的輸入（不含答案）
-    build_verifier_input(traj, "QEJevA", selected_e=seg_ids)  # Jev 選出的 E（seg_id 清單）
+    traj.label.correct  # 標籤：True / False
+    build_verifier_input(traj, "QEA").text  # 條件：QERA / QA / QEA
+    selector_view(traj)  # 給 Jev 的輸入（不含答案）
+    build_verifier_input(
+        traj, "QEJevA", selected_e=seg_ids
+    )  # Jev 選出的 E（seg_id 清單）
 ```
 
 ### 常用指令
@@ -66,3 +68,19 @@ uv run bash scripts/convert_all.sh
 ### 注意
 
 - 資料檔不要 commit（`.gitignore` 已排除）。
+
+## Jev evidence selection (Kai)
+
+Jev (TypeSafe, via Vercel AI Gateway) asks one four-way question per E
+candidate from `selector_view`: is this evidence irrelevant, context,
+confirms the candidate answer, or refutes it? usefulness = P(confirms) +
+P(refutes). The most useful candidates are packed into the token budget. The
+output is a selections JSONL that `verification2 run --selector file`
+consumes; per-candidate probabilities land next to it in `*.scores.jsonl`.
+
+```
+# .env: AI_GATEWAY_API_KEY=...
+uv run python -m verification2.jev select --input data/tau2_bench.balanced.jsonl --budget 2048 --out selections/tau2_jev_2048.jsonl
+uv run verification2 run --input data/tau2_bench.balanced.jsonl --output outputs/tau2_jev --selector file --selections selections/tau2_jev_2048.jsonl --budget 2048 --backend dry-run
+uv run python -m verification2.jev usage      # Jev token / cost ledger
+```
