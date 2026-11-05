@@ -101,7 +101,19 @@ class JevClient:
         backoff = 1.0
         for attempt in range(self.max_retries + 1):
             t0 = time.perf_counter()
-            resp = self._http.post(self.url, json=body)
+            try:
+                resp = self._http.post(self.url, json=body)
+            except httpx.TransportError as exc:
+                # Timeouts and dropped connections: retry like a 5xx; the gateway is stateless.
+                latency = time.perf_counter() - t0
+                self.ledger.record(self.model, self.run, 0, 0, 0.0, latency, 0)
+                if attempt == self.max_retries:
+                    raise JevError(
+                        f"gateway unreachable after {attempt + 1} attempts: {exc!r}"
+                    ) from exc
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+                continue
             latency = time.perf_counter() - t0
             if resp.status_code == 200:
                 result = self._parse(resp.json(), latency)
