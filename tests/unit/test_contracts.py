@@ -11,6 +11,7 @@ from tests.support import SENTINEL, _toy
 @pytest.mark.unit
 def test_no_hidden_or_label_reaches_verifier():
     t = _toy()
+    t.meta["jev_selection"] = {"keep": ["s2_text_0", "s3_text_0"]}
     for cond in CONDITIONS:
         assert SENTINEL not in build_verifier_input(t, cond).text, cond
 

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from qera.jsonl import read_jsonl
 
-from ..agents import classification
+from ..agents import classification, selection
 from ..agents import verifier as pipeline
 from ..benchmarks.doctor import check
 from ..core.prompts import load_prompts
@@ -180,6 +180,40 @@ def main(argv=None):
         if classified is None:
             raise ValueError("No validated Jev classifications were published")
         summary.jev(classified.parent)
+        if "QJevA" in args.conditions:
+            classified = stage(
+                "selector",
+                digest(
+                    [
+                        "selector",
+                        file_hash(classified),
+                        jev_model,
+                        jev_endpoint,
+                        {
+                            b: prompts.selection(b).model_dump()
+                            for b in {t.benchmark for t in trajectories}
+                        },
+                        file_hash(args.protocol) if args.protocol else None,
+                        code_hash(),
+                    ]
+                ),
+                lambda out: selection.run(
+                    SimpleNamespace(
+                        input=[classified],
+                        output=out,
+                        backend="http",
+                        model=jev_model,
+                        endpoint=jev_endpoint,
+                        timeout=None,
+                        cache_dir=cache,
+                        prompt_file=args.prompt_file,
+                        protocol=args.protocol,
+                    )
+                ),
+                "trajectories.jsonl",
+            )
+            if classified is None:
+                raise ValueError("No validated Jev selections were published")
         verifier = resolve("verifier", os.environ.get("VERIFIER_MODEL"))
         model, endpoint = verifier.model, verifier.endpoint
         verified = stage(

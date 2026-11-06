@@ -116,7 +116,8 @@ doctor_step() {
 
 freeze_step() {
   "${UV[@]}" python -m verification2.experiments.protocol --benchmarks $BENCHMARKS \
-    --prompt-file "$PROMPTS" --output "$OUTPUT/protocol.json"
+    --prompt-file "$PROMPTS" --conditions ${CONDITIONS:-QA QEA QRA QERA} \
+    --output "$OUTPUT/protocol.json"
 }
 
 partition_step() {

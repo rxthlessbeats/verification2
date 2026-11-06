@@ -39,7 +39,12 @@ reordered tool results remain flagged; source order is preserved.
 |---|---|---|---|
 | Solver | Native task/environment → fresh frozen episode and native outcome | `SOLVER_MODEL` | Chat Completions |
 | Jev | Natural blocks without E/R hints → validated E/R overrides and records | `JEV_MODEL` | System One |
-| Verifier | Frozen QA/QEA/QRA/QERA view → verdict and reason | `VERIFIER_MODEL` | Messages, else Chat Completions |
+| Jev selector | Each E/R piece with the task and answer → useful, misleading or irrelevant (only with QJevA) | `JEV_MODEL` | System One |
+| Verifier | Frozen QA/QEA/QRA/QERA/QJevA view → verdict and reason | `VERIFIER_MODEL` | Messages, else Chat Completions |
+
+QJevA shows Q, A and only the E/R pieces Jev labelled useful; the selector
+prompt is `selector` in `prompts.yaml`, and the experiment runs it only when
+QJevA is among the conditions.
 
 Each role names a model in `.env`; the model's endpoint for that API, its key
 variable and limits come from `src/verification2/core/models.yaml`.

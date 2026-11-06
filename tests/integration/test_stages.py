@@ -430,3 +430,52 @@ def test_anthropic_verifier_logs_exact_blinded_wire_requests(tmp_path):
         json.loads((output / "manifest.json").read_text())["api_format"]
         == "anthropic_messages"
     )
+
+
+@pytest.mark.integration
+def test_jev_selection_keeps_only_useful_pieces_for_qjeva(tmp_path, monkeypatch):
+    from qera.render import build_verifier_input
+    from verification2.agents.verifier import Backend
+
+    source = tmp_path / "classified.jsonl"
+    write_jsonl([sample()], str(source))
+    labels = {"s1_text_0": "useful", "s1_call": "misleading", "s2_text_0": "irrelevant"}
+    sent = []
+
+    def send(self, request):
+        sent.append(request)
+        (question,) = request["questions"]
+        choice = labels[question]
+        return {"answers": {question: {"type": "choice", "choice": choice}}}
+
+    monkeypatch.setattr(Backend, "_send", send)
+    output = tmp_path / "selected"
+    with pytest.raises(SystemExit) as status:
+        main(
+            [
+                "select",
+                "--input",
+                str(source),
+                "--output",
+                str(output),
+                "--backend",
+                "http",
+                "--model",
+                "typesafe-ai/jev",
+            ]
+        )
+    assert status.value.code == 0
+    assert {next(iter(r["questions"])) for r in sent} == set(labels)
+    assert all(r["state"]["answer"][0]["text"] == "red" for r in sent)
+    assert "NEVER_SEND_THE_GOLD" not in json.dumps(sent)
+    (selected,) = read_jsonl([output / "trajectories.jsonl"])
+    assert selected.meta["jev_selection"]["keep"] == ["s1_text_0"]
+    text = build_verifier_input(selected, "QJevA").text
+    assert "Registry: blue." in text and "lookup(…)" in text
+    assert "I suspect red." not in text and '"unit"' not in text
+    assert "Report the registered color." in text and text.endswith("red")
+    everything = dict.fromkeys(classification_view(selected)["targets"])
+    selected.meta["jev_selection"]["keep"] = list(everything)
+    assert build_verifier_input(selected, "QJevA") == build_verifier_input(
+        selected, "QERA"
+    )

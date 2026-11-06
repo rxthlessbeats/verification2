@@ -5,7 +5,9 @@ Study which trajectory information improves agent verification.
 **Solver → Jev E/R labels → verifier.** Use fresh τ²-Bench, SWE-bench Verified
 and ARB/WebArena episodes. Each benchmark has a frozen train/test split, and its
 first train task is the pilot. Develop with QERA on train; compare QA/QEA/QRA/QERA
-once on the held-out test set.
+once on the held-out test set. Optionally, Jev also labels each E/R piece useful,
+misleading or irrelevant, and the QJevA view keeps only the useful ones
+(`--conditions "QA QEA QRA QERA QJevA"`).
 
 - [Setup and commands](docs/FRESH_RUN.md)
 - [Experiment protocol](docs/FULL_RUN_PLAN.md)

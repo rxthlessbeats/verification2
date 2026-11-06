@@ -53,7 +53,7 @@ class ProviderResponse(BaseModel):
 
 class JevChoice(ProviderResponse):
     type: Literal["choice"]
-    choice: Literal["E", "R"]
+    choice: Name
 
 
 class JevResponse(ProviderResponse):
@@ -126,6 +126,11 @@ class VerifierResult(Result):
 class ClassificationResult(Result):
     overrides: list[Override] = Field(default_factory=list)
     classification_ms: Milliseconds = 0
+
+
+class SelectionResult(Result):
+    labels: dict[str, Name] = Field(default_factory=dict)
+    selection_ms: Milliseconds = 0
 
 
 class MetricSummary(Settings):

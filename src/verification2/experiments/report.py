@@ -17,6 +17,7 @@ CONTRASTS = {
     "add_R_without_E": ("QRA", "QA"),
     "add_R_with_E": ("QERA", "QEA"),
     "add_E_with_R": ("QERA", "QRA"),
+    "jev_selection": ("QJevA", "QERA"),
 }
 
 

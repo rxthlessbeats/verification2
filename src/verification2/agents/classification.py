@@ -61,16 +61,16 @@ def classification_view(trajectory):
     }
 
 
-def task_context(view):
+def task_context(view, wanted="Q"):
     return [
         {"seg_id": s["seg_id"], "speaker": s["speaker"], "text": s["text"][start:end]}
         for s in view["segments"]
         for start, end, role in s["protected_spans"]
-        if role == "Q"
+        if role == wanted
     ]
 
 
-def classification_request(model, view, prompt: JevPrompt, question_id):
+def classification_request(model, view, prompt: JevPrompt, question_id, answer=False):
     """One E/R piece per call with the task (Q) as context, within Jev's 32k window."""
     target = view["targets"][question_id]
     segment = view["segments"][target["seg_id"]]
@@ -92,22 +92,26 @@ def classification_request(model, view, prompt: JevPrompt, question_id):
     }
     return {
         "model": model,
-        "state": {"benchmark": view["benchmark"], "task": task_context(view)},
+        "state": {"benchmark": view["benchmark"], "task": task_context(view)}
+        | ({"answer": task_context(view, "A")} if answer else {}),
         "questions": {question_id: question},
     }
 
 
-def parse_answer(response, question_id):
+def parse_answer(response, question_id, choices=("E", "R")):
     answers = JevResponse.model_validate(response).answers
     if set(answers) != {question_id}:
-        raise ValueError("Jev must answer exactly the supplied E/R question ID")
+        raise ValueError("Jev must answer exactly the supplied question ID")
+    if answers[question_id].choice not in choices:
+        raise ValueError("Jev chose an unknown option")
     return {"answer": answers[question_id].model_dump()}
 
 
-def ask_jev(backend, calls):
+def ask_jev(backend, calls, choices=("E", "R")):
     def ask(question_id):
         return backend.call(
-            calls[question_id], parser=lambda raw: parse_answer(raw, question_id)
+            calls[question_id],
+            parser=lambda raw: parse_answer(raw, question_id, choices),
         )
 
     with ThreadPoolExecutor(JEV_WORKERS) as pool:
@@ -129,6 +133,8 @@ def parse_classification(response, trajectory, view):
     for question_id, target in view["targets"].items():
         answer = answers[question_id]
         role, seg_id = answer.choice, target["seg_id"]
+        if role not in ("E", "R"):
+            raise ValueError("Jev must classify each piece as E or R")
         row = overrides.setdefault(
             (trajectory.traj_id, seg_id),
             {"traj_id": trajectory.traj_id, "seg_id": seg_id, "source": "classifier"},

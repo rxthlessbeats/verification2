@@ -458,6 +458,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     from .classification import run as classify
+    from .selection import run as select
     from .solver import add_args as solver_args
     from .solver import run as solve
 
@@ -473,6 +474,14 @@ def main(argv=None):
     classifier.add_argument("--backend", choices=["dry-run", "http"], default="dry-run")
     classifier.add_argument("--protocol", type=Path)
     model_args(classifier, "JEV", generation=False)
+    selector = commands.add_parser(
+        "select", help="Label E/R pieces useful, misleading or irrelevant with Jev"
+    )
+    selector.add_argument("--input", nargs="+", required=True)
+    selector.add_argument("--output", type=Path, required=True)
+    selector.add_argument("--backend", choices=["dry-run", "http"], default="dry-run")
+    selector.add_argument("--protocol", type=Path)
+    model_args(selector, "JEV", generation=False)
     runner = commands.add_parser(
         "run", aliases=["verify"], help="Verify frozen classified trajectories"
     )
@@ -490,6 +499,8 @@ def main(argv=None):
         raise SystemExit(solve(with_endpoint(args, "solver")))
     if args.command == "classify":
         raise SystemExit(classify(with_endpoint(args, "jev")))
+    if args.command == "select":
+        raise SystemExit(select(with_endpoint(args, "jev")))
     raise SystemExit(run(with_endpoint(args, "verifier")))
 
 

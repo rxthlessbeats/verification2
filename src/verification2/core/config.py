@@ -16,7 +16,7 @@ from pydantic import (
 Name = Annotated[str, StringConstraints(strict=True, min_length=1, pattern=r"\S")]
 PositiveInt = Annotated[int, Field(strict=True, gt=0)]
 Timeout = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
-Condition = Literal["QERA", "QA", "QEA", "QRA"]
+Condition = Literal["QERA", "QA", "QEA", "QRA", "QJevA"]
 Mode = Literal["dry-run", "mock", "http"]
 Domain = Literal["airline", "retail", "telecom"]
 Benchmark = Literal["tau2_bench", "swebench_verified", "agentrewardbench"]
@@ -72,7 +72,7 @@ class VerifierConfig(ProviderConfig):
 
 
 class ClassificationConfig(ProviderConfig):
-    command: Literal["classify"] = "classify"
+    command: Literal["classify", "select"] = "classify"
     backend: Literal["dry-run", "http"] = "dry-run"
     input: list[Path] = Field(min_length=1)
     output: Path

@@ -12,7 +12,7 @@ from pydantic import Field, model_validator
 import qera
 
 from ..benchmarks.setup import ROOT
-from ..core.config import Endpoint, Name, PositiveInt, Settings
+from ..core.config import Condition, Endpoint, Name, PositiveInt, Settings
 from ..core.prompts import load_prompts
 from ..core.registry import max_output_tokens, resolve
 from ..data.split import BENCHMARKS, digest, load_split, split_id
@@ -88,13 +88,14 @@ class Protocol(Settings):
     jev_model: Name
     jev_endpoint: Endpoint
     jev_prompt_hashes: dict[str, str]
+    selector_prompt_hashes: dict[str, str]
     verifier_model: Name
     verifier_endpoint: Endpoint
     verifier_reasoning_effort: Name | None = None
     verifier_prompt_hash: Name
     verifier_max_tokens: PositiveInt | None = None
     temperature: Literal[0] = 0
-    conditions: list[Literal["QA", "QEA", "QRA", "QERA"]] = Field(min_length=1)
+    conditions: list[Condition] = Field(min_length=1)
 
     @model_validator(mode="after")
     def unique_conditions(self):
@@ -148,14 +149,17 @@ def check_stage(trajectories, args, prompts, stage):
         raise ValueError(
             "Native dependency locks differ from the frozen held-out protocol"
         )
-    if args.model != getattr(protocol, stage + "_model") or args.endpoint != getattr(
-        protocol, stage + "_endpoint"
+    role = "jev" if stage == "selector" else stage
+    if args.model != getattr(protocol, role + "_model") or args.endpoint != getattr(
+        protocol, role + "_endpoint"
     ):
         raise ValueError("Model/endpoint differs from the frozen held-out protocol")
-    if stage == "jev":
+    if stage in ("jev", "selector"):
+        prompt = prompts.classification if stage == "jev" else prompts.selection
+        hashes = getattr(protocol, stage + "_prompt_hashes")
         if any(
-            digest(prompts.classification(t.benchmark).model_dump(mode="json"))
-            != protocol.jev_prompt_hashes.get(t.benchmark)
+            digest(prompt(t.benchmark).model_dump(mode="json"))
+            != hashes.get(t.benchmark)
             for t in heldout
         ):
             raise ValueError("Jev prompt differs from the frozen held-out protocol")
@@ -215,6 +219,9 @@ def main(argv=None):
         jev_prompt_hashes={
             b: digest(prompts.classification(b).model_dump(mode="json"))
             for b in BENCHMARKS
+        },
+        selector_prompt_hashes={
+            b: digest(prompts.selection(b).model_dump(mode="json")) for b in BENCHMARKS
         },
         verifier_model=verifier.model,
         verifier_endpoint=verifier.endpoint,

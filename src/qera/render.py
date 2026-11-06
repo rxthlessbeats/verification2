@@ -11,6 +11,7 @@ CONDITIONS = {
     "QA": {Role.Q, Role.A},
     "QEA": {Role.Q, Role.E, Role.A},
     "QRA": {Role.Q, Role.R, Role.A},
+    "QJevA": set(Role),
 }
 
 
@@ -26,12 +27,27 @@ def build_verifier_input(traj: Trajectory, condition: str) -> VerifierInput:
             f"Unknown condition {condition}; choose from {list(CONDITIONS)}"
         )
     keep = CONDITIONS[condition]
+    chosen = None
+    if condition == "QJevA":
+        if "jev_selection" not in traj.meta:
+            raise ValueError(f"{traj.traj_id}: QJevA needs the Jev selection stage")
+        chosen = set(traj.meta["jev_selection"]["keep"])
+
+    def shown(role, piece):
+        if role not in keep:
+            return False
+        return chosen is None or role in (Role.Q, Role.A) or piece in chosen
+
     parts, ids = [], []
     for s in traj.segments:
-        pieces = [t for r, t in s.pieces() if r in keep and t]
+        pieces = [
+            t
+            for i, (r, t) in enumerate(s.pieces())
+            if t and shown(r, f"s{s.seg_id}_text_{i}")
+        ]
         call = None
         if s.call is not None:
-            if s.call_role in keep:
+            if shown(s.call_role, f"s{s.seg_id}_call"):
                 call = s.call.render()
             elif pieces:
                 call = s.call.render(include_args=False)
