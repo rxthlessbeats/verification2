@@ -33,6 +33,8 @@ def test_reasoning_effort_comes_from_env_and_must_be_listed_for_the_model(
     assert resolve("solver", "glm-5.3-flash").reasoning_effort == "max"
     assert resolve("verifier", "qwen3.8-flash").reasoning_effort == "xhigh"
     assert resolve("jev", "typesafe-ai/jev").reasoning_effort is None
+    monkeypatch.setenv("VERIFIER_REASONING_EFFORT", "provider")
+    assert resolve("verifier", "qwen3.8-flash").reasoning_effort is None
     with pytest.raises(
         ValueError, match=r"SOLVER_REASONING_EFFORT=max .*qwen3.8-flash"
     ):

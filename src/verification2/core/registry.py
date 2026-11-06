@@ -93,11 +93,13 @@ def resolve(role, model):
 
 
 def reasoning_effort(role, model, found):
-    """Empty uses the model's default; None means requests omit the field."""
+    """Empty uses the model's default; None (or "provider") means requests omit the field."""
     if role == "jev":
         return None
     variable = role.upper() + "_REASONING_EFFORT"
     effort = os.environ.get(variable) or found.default_reasoning_effort
+    if effort == "provider":
+        return None
     if effort and effort not in found.reasoning_efforts:
         allowed = ", ".join(found.reasoning_efforts) or "none in models.yaml"
         raise ValueError(f"{variable}={effort} is not supported by {model} ({allowed})")

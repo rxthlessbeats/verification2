@@ -91,7 +91,8 @@ All 278 tasks of τ²'s official split, one fresh solver episode each (run of
 provider's default reasoning level, temperature 0, seed 42; Jev is
 `typesafe-ai/jev`. The verifier sees the question (Q), the final answer (A) and
 optionally the environment evidence (E) and the solver's reasoning (R) as labelled
-by Jev. False rejection is the share of natively correct episodes the verifier
+by Jev. QJevA shows Q, A and only the E/R pieces Jev's selector labelled useful
+(73% of 3,445 test pieces; 18% irrelevant, 8% misleading). False rejection is the share of natively correct episodes the verifier
 calls incorrect; false acceptance is the share of natively incorrect episodes it
 calls correct. Brackets are 95% bootstrap intervals over tasks (2,000 draws,
 conditions resampled together). Every check returned a valid verdict (coverage
@@ -104,6 +105,7 @@ conditions resampled together). Every check returned a valid verdict (coverage
 | Test (100) | QEA | 87 / 13 | 11.5% [5.6, 18.6] | 30.8% [7.1, 58.3] |
 | Test (100) | QRA | 87 / 13 | 12.6% [6.1, 20.3] | 61.5% [33.3, 88.9] |
 | Test (100) | QERA | 87 / 13 | 11.5% [5.6, 18.8] | 69.2% [41.7, 93.3] |
+| Test (100) | QJevA | 87 / 13 | 11.5% [4.8, 18.4] | 53.8% [27.3, 81.8] |
 
 Paired changes on the test set, in percentage points:
 
@@ -113,3 +115,4 @@ Paired changes on the test set, in percentage points:
 | Add R (QA → QRA) | +3.4 [−1.2, +8.6] | −7.7 [−35.7, +20.0] |
 | Add R to E (QEA → QERA) | 0.0 [−3.5, +3.4] | **+38.5 [+12.5, +66.7]** |
 | Add E to R (QRA → QERA) | −1.1 [−6.5, +3.5] | +7.7 [−18.2, +35.7] |
+| Jev selection (QERA → QJevA) | 0.0 [−5.7, +5.5] | −15.4 [−53.8, +22.2] |
