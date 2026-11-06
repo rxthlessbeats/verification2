@@ -1,20 +1,4 @@
-"""τ²-Bench adapter。
-
-輸入：tau2 的 simulation results JSON（官方 data/tau2/results/final/*.json，或你們自己用
-`tau2 run` 跑出來的結果，格式相同）。
-
-Q/E/R/A 規則（理由見 SPEC.md §4.3）：
-- Q : domain policy（需求）＋所有使用者說的話（需求在多輪對話裡逐步展開）
-- E : assistant 的 READ / GENERIC 工具呼叫與回傳（呼叫內容當作來源標頭）；
-      寫入型工具的回傳（確認訊息）；使用者端裝置的工具呼叫與回傳（telecom）
-- R : 伴隨工具呼叫的旁白；raw_data 裡的 reasoning_content / thinking_blocks（自己跑推理模型時）
-- A : 所有 WRITE 工具呼叫（真正改變資料庫狀態的動作）＋ transfer_to_human_agents
-      ＋ 所有對使用者說的話（τ² 的評分包含「有沒有告知使用者某資訊」，
-        而這些資訊常出現在中途回覆；中途回覆標 ambiguous）
-- 標籤：reward_info.reward == 1 視為正確（τ² 官方 pass^1 的定義）
-
-不會給 verifier 看的內容：task 的 user_scenario（模擬使用者的劇本）、evaluation_criteria。
-"""
+"""Convert native tau2 conversations, tools and rewards to QERA."""
 
 from __future__ import annotations
 
@@ -32,11 +16,8 @@ BENCHMARK = "tau2_bench"
 DOMAIN = "tool_use"
 TERMINAL_GENERIC = {"transfer_to_human_agents"}
 GREETING = "Hi! How can I help you today?"
-CONTROL_RE = re.compile(
-    r"###(?:STOP|TRANSFER|OUT-OF-SCOPE)###"
-)  # user simulator 的控制符號  # 標為 GENERIC 但其實是終止型動作
+CONTROL_RE = re.compile(r"###(?:STOP|TRANSFER|OUT-OF-SCOPE)###")
 
-# 官方結果檔名：{agent_llm}_{domain}_{mode}_{user_llm}_{n}trials.json
 FNAME_RE = re.compile(
     r"^(?P<agent>.+?)_(?P<domain>airline|retail|telecom-workflow|telecom|mock|banking_knowledge|intake)_(?P<mode>[a-z\-]+)_(?P<user>.+?)_(?P<n>\d+)trials\.json$"
 )
@@ -75,6 +56,7 @@ def convert_file(
     tau2_root: str | None = None,
     include_policy: bool = True,
     only_modes: tuple[str, ...] = ("default",),
+    tool_types: dict | None = None,
 ) -> Iterator[Trajectory]:
     path_ = Path(path)
     m = FNAME_RE.match(path_.name)
@@ -90,25 +72,27 @@ def convert_file(
     domain = file_domain or (info.get("environment_info") or {}).get(
         "domain_name", "unknown"
     )
-    types = _load_tool_types()
-    policy = _load_policy(domain, tau2_root) if include_policy else None
+    types = tool_types if tool_types is not None else _load_tool_types()
+    # Fresh runs must retain the policy actually used, independent of bundled snapshots.
+    policy = (
+        (
+            (info.get("environment_info") or {}).get("policy")
+            or _load_policy(domain, tau2_root)
+        )
+        if include_policy
+        else None
+    )
     native = (
         "hidden" if any(k in agent_llm.lower() for k in _REASONING_MODELS) else "none"
     )
     origin = "official_release" if "results/final" in str(path_) else "self_generated"
 
     for sim in data["simulations"]:
-        yield _convert_sim(
-            sim, domain, mode, agent_llm, info, types, policy, native, origin
-        )
+        yield _convert_sim(sim, domain, agent_llm, info, types, policy, native, origin)
 
 
 def _raw_reasoning(mm: dict) -> str:
-    """從訊息本身與 raw_data（LiteLLM 的完整回應）取出推理內容，規則統一在 reasoning.py。
-
-    自己用 vLLM / Qwen thinking 跑 τ² 時，推理在 raw_data.message 或
-    raw_data.choices[0].message 的 reasoning_content / reasoning；Anthropic 則在 thinking_blocks。
-    """
+    """Read reasoning from the message and its raw API response."""
     raw = mm.get("raw_data") or {}
     msgs = [mm, raw.get("message") or {}] + [
         c.get("message") or {} for c in raw.get("choices") or []
@@ -123,7 +107,7 @@ def _raw_reasoning(mm: dict) -> str:
 
 
 def _convert_sim(
-    sim, domain, mode, agent_llm, info, types, policy, native, origin
+    sim, domain, agent_llm, info, types, policy, native, origin
 ) -> Trajectory:
     b = TrajectoryBuilder()
     if policy:
@@ -132,12 +116,11 @@ def _convert_sim(
             "system",
             "policy",
             policy,
-            note="domain policy 是任務需求的一部分",
+            note="Domain policy is part of the task.",
             source_id="policy",
         )
 
     msgs = sim["messages"]
-    # 找出最後一則「對使用者說話」的 assistant 訊息 → A / final_answer
     last_reply = max(
         (
             i
@@ -164,9 +147,9 @@ def _convert_sim(
                     text,
                     step=i,
                     source_id=f"msg:{i}/content",
-                    note="使用者發言可能同時含需求（Q）與觀測（E）；如需細分，用 spans 切開（Kai / 人工稽核）",
+                    note="User message may mix requirements and observations; use spans to separate them.",
                 )
-            for tc in tcs:  # telecom：使用者在自己的裝置上操作
+            for tc in tcs:
                 pending[tc["id"]] = ToolCall(
                     name=tc["name"],
                     arguments=tc.get("arguments"),
@@ -175,7 +158,6 @@ def _convert_sim(
                 )
                 b.record_call(tc["id"])
         elif role == "assistant":
-            # 沒開 reasoning parser 時，思考會以 <think>…</think> 留在 content 裡
             think, content, unclosed = rsn.split_think(content)
             if unclosed:
                 b.mark_incomplete("unclosed_think", f"msg:{i}")
@@ -220,13 +202,13 @@ def _convert_sim(
                             step=i,
                             call=call,
                             source_id=f"msg:{i}/tool_call:{k}",
-                            note="寫入型工具：會改變資料庫狀態，屬於最終產出的一部分",
+                            note="Write tool changes task state and is part of the candidate output.",
                         )
                     pending[tc["id"]] = call
                     b.record_call(tc["id"], action_segment)
             elif content.strip():
                 if i == 0 and content.strip() == GREETING:
-                    continue  # τ² 框架寫死的開場白，不是 solver 產生的
+                    continue
                 if i == last_reply:
                     b.add(
                         Role.A,
@@ -245,8 +227,8 @@ def _convert_sim(
                         step=i,
                         ambiguous=True,
                         source_id=f"msg:{i}/content",
-                        note="τ² 會檢查 agent 是否告知使用者特定資訊（communicate_checks），這些資訊常出現在中途回覆，"
-                        "所以預設歸 A；但回覆裡也夾帶詮釋，Kai 可再細分",
+                        note="Intermediate replies count toward native communicate_checks; "
+                        "keep them as A unless explicitly split.",
                     )
         elif role == "tool":
             call = pending.pop(mm.get("id", ""), None)
@@ -282,7 +264,6 @@ def _convert_sim(
         benchmark=BENCHMARK,
         domain=DOMAIN,
         task_id=f"{domain}/{sim['task_id']}",
-        split=mode,
         solver=SolverInfo(
             model=agent_llm,
             agent="tau2_llm_agent",
@@ -302,27 +283,3 @@ def _convert_sim(
             "communicate_checks": ri.get("communicate_checks"),
         },
     )
-
-
-def add_args(p) -> None:
-    p.add_argument(
-        "--input", nargs="+", required=True, help="tau2 results JSON 檔（可多個）"
-    )
-    p.add_argument(
-        "--tau2-root",
-        default=None,
-        help="tau2-bench repo 路徑（讀 policy；不給則用內建副本）",
-    )
-    p.add_argument(
-        "--modes",
-        default="default",
-        help="要保留的模式，逗號分隔（default,no-user,op,...）",
-    )
-    p.add_argument("--no-policy", action="store_true", help="Q 不放 domain policy")
-
-
-def run(args) -> Iterator[Trajectory]:
-    for f in args.input:
-        yield from convert_file(
-            f, args.tau2_root, not args.no_policy, tuple(args.modes.split(","))
-        )

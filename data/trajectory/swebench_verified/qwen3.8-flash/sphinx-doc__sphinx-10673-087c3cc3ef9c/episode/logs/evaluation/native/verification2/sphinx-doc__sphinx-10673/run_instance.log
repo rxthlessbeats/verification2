@@ -1,0 +1,369 @@
+2026-11-05 21:57:25,371 - INFO - Creating container for sphinx-doc__sphinx-10673...
+2026-11-05 21:57:25,468 - INFO - Container for sphinx-doc__sphinx-10673 created: 251291d5e4610ae0d5853252147a63f4acb80d9e1464d6a1ea0e1974df00f76c
+2026-11-05 21:57:25,769 - INFO - Container for sphinx-doc__sphinx-10673 started: 251291d5e4610ae0d5853252147a63f4acb80d9e1464d6a1ea0e1974df00f76c
+2026-11-05 21:57:25,770 - INFO - Intermediate patch for sphinx-doc__sphinx-10673 written to logs/evaluation/native/verification2/sphinx-doc__sphinx-10673/patch.diff, now applying to container...
+2026-11-05 21:57:25,925 - INFO - >>>>> Applied Patch:
+Checking patch CHANGES...
+Checking patch doc/usage/restructuredtext/directives.rst...
+Checking patch sphinx/directives/other.py...
+Checking patch sphinx/environment/adapters/toctree.py...
+Checking patch sphinx/environment/collectors/toctree.py...
+Applied patch CHANGES cleanly.
+Applied patch doc/usage/restructuredtext/directives.rst cleanly.
+Applied patch sphinx/directives/other.py cleanly.
+Applied patch sphinx/environment/adapters/toctree.py cleanly.
+Applied patch sphinx/environment/collectors/toctree.py cleanly.
+
+2026-11-05 21:57:26,267 - INFO - Git diff before:
+diff --git a/CHANGES b/CHANGES
+index ba01f72a9..90ec78048 100644
+--- a/CHANGES
++++ b/CHANGES
+@@ -18,9 +18,10 @@ Features added
+ * #10755: linkcheck: Check the source URL of raw directives that use the ``url``
+   option.
+ * #10781: Allow :rst:role:`ref` role to be used with definitions and fields.
+-* #10717: HTML Search: Increase priority for full title and 
++* #10717: HTML Search: Increase priority for full title and
+   subtitle matches in search results
+ * #10718: HTML Search: Save search result score to the HTML element for debugging
++* #10673: Make toctree accept 'genindex', 'modindex' and 'search' docnames
+ 
+ Bugs fixed
+ ----------
+diff --git a/doc/usage/restructuredtext/directives.rst b/doc/usage/restructuredtext/directives.rst
+index 4029b04e6..4a5056ecf 100644
+--- a/doc/usage/restructuredtext/directives.rst
++++ b/doc/usage/restructuredtext/directives.rst
+@@ -95,6 +95,13 @@ tables of contents.  The ``toctree`` directive is the central element.
+    You can also add external links, by giving an HTTP URL instead of a document
+    name.
+ 
++   .. versionchanged:: 5.2
++
++      The :ref:`special document names <special-names>` ``genindex``,
++      ``modindex`` and ``search`` can be given instead of a document name too;
++      they link to the general index, the module index and the search page,
++      respectively.
++
+    **Section numbering**
+ 
+    If you want to have section numbers even in HTML output, give the
+@@ -220,6 +227,8 @@ tables of contents.  The ``toctree`` directive is the central element.
+    .. versionchanged:: 1.3
+       Added "caption" and "name" option.
+ 
++.. _special-names:
++
+ Special names
+ ^^^^^^^^^^^^^
+ 
+@@ -244,6 +253,16 @@ The special document names (and pages generated for them) are:
+   JavaScript to full-text search the generated documents for search words; it
+   should work on every major browser that supports modern JavaScript.
+ 
++  These names can be used in a :rst:dir:`toctree` directive to add a link to
++  the corresponding page to the table of contents, like this::
++
++     .. toctree::
++        :caption: Indices
++
++        genindex
++        modindex
++        search
++
+ * every name beginning with ``_``
+ 
+   Though few such names are currently used by Sphinx, you should not
+diff --git a/sphinx/directives/other.py b/sphinx/directives/other.py
+index 35e16e623..fa8fc191a 100644
+--- a/sphinx/directives/other.py
++++ b/sphinx/directives/other.py
+@@ -77,10 +77,11 @@ class TocTree(SphinxDirective):
+         return ret
+ 
+     def parse_content(self, toctree: addnodes.toctree) -> List[Node]:
++        generated_docnames = frozenset(self.env.domains['std'].initial_data['labels'].keys())
+         suffixes = self.config.source_suffix
+ 
+         # glob target documents
+-        all_docnames = self.env.found_docs.copy()
++        all_docnames = self.env.found_docs.copy() | generated_docnames
+         all_docnames.remove(self.env.docname)  # remove current document
+ 
+         ret: List[Node] = []
+@@ -95,6 +96,9 @@ class TocTree(SphinxDirective):
+                 patname = docname_join(self.env.docname, entry)
+                 docnames = sorted(patfilter(all_docnames, patname))
+                 for docname in docnames:
++                    if docname in generated_docnames:
++                        # don't include generated documents in globs
++                        continue
+                     all_docnames.remove(docname)  # don't include it again
+                     toctree['entries'].append((None, docname))
+                     toctree['includefiles'].append(docname)
+@@ -118,7 +122,7 @@ class TocTree(SphinxDirective):
+                 docname = docname_join(self.env.docname, docname)
+                 if url_re.match(ref) or ref == 'self':
+                     toctree['entries'].append((title, ref))
+-                elif docname not in self.env.found_docs:
++                elif docname not in self.env.found_docs | generated_docnames:
+                     if excluded(self.env.doc2path(docname, False)):
+                         message = __('toctree contains reference to excluded document %r')
+                         subtype = 'excluded'
+diff --git a/sphinx/environment/adapters/toctree.py b/sphinx/environment/adapters/toctree.py
+index 9678e3c7c..acb06878c 100644
+--- a/sphinx/environment/adapters/toctree.py
++++ b/sphinx/environment/adapters/toctree.py
+@@ -1,6 +1,6 @@
+ """Toctree adapter for sphinx.environment."""
+ 
+-from typing import TYPE_CHECKING, Any, Iterable, List, Optional, cast
++from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple, cast
+ 
+ from docutils import nodes
+ from docutils.nodes import Element, Node
+@@ -54,6 +54,10 @@ class TocTree:
+         """
+         if toctree.get('hidden', False) and not includehidden:
+             return None
++        # the virtual documents that are generated by Sphinx itself,
++        # e.g. the general index, the module index and the search page
++        generated_docnames: Dict[str, Tuple[str, str, str]] = (
++            self.env.domains['std'].initial_data['labels'].copy())
+ 
+         # For reading the following two helper function, it is useful to keep
+         # in mind the node structure of a toctree (using HTML-like node names
+@@ -139,6 +143,17 @@ class TocTree:
+                         item = nodes.list_item('', para)
+                         # don't show subitems
+                         toc = nodes.bullet_list('', item)
++                    elif ref in generated_docnames:
++                        # a virtual document generated by Sphinx, e.g. the general
++                        # index: link to it and don't show any subitems
++                        refdoc, _, sectionname = generated_docnames[ref]
++                        if not title:
++                            title = sectionname
++                        reference = nodes.reference('', title, internal=True,
++                                                    refuri=refdoc, anchorname='')
++                        para = addnodes.compact_paragraph('', '', reference)
++                        item = nodes.list_item('', para)
++                        toc = nodes.bullet_list('', item)
+                     else:
+                         if ref in parents:
+                             logger.warning(__('circular toctree references '
+diff --git a/sphinx/environment/collectors/toctree.py b/sphinx/environment/collectors/toctree.py
+index 52a8fd8d1..cb664648a 100644
+--- a/sphinx/environment/collectors/toctree.py
++++ b/sphinx/environment/collectors/toctree.py
+@@ -201,6 +201,7 @@ class TocTreeCollector(EnvironmentCollector):
+ 
+     def assign_figure_numbers(self, env: BuildEnvironment) -> List[str]:
+         """Assign a figure number to each figure under a numbered toctree."""
++        generated_docnames = frozenset(env.domains['std'].initial_data['labels'].keys())
+ 
+         rewrite_needed = []
+ 
+@@ -259,6 +260,9 @@ class TocTreeCollector(EnvironmentCollector):
+                         if url_re.match(subdocname) or subdocname == 'self':
+                             # don't mess with those
+                             continue
++                        if subdocname in generated_docnames:
++                            # or these
++                            continue
+ 
+                         _walk_doc(subdocname, secnum)
+                 elif isinstance(subnode, nodes.Element):
+2026-11-05 21:57:26,268 - INFO - Eval script for sphinx-doc__sphinx-10673 written to logs/evaluation/native/verification2/sphinx-doc__sphinx-10673/eval.sh; copying to container...
+2026-11-05 21:57:30,946 - INFO - Test runtime: 4.58 seconds
+2026-11-05 21:57:30,947 - INFO - Test output for sphinx-doc__sphinx-10673 written to logs/evaluation/native/verification2/sphinx-doc__sphinx-10673/test_output.txt
+2026-11-05 21:57:31,064 - INFO - Git diff after:
+diff --git a/CHANGES b/CHANGES
+index ba01f72a9..90ec78048 100644
+--- a/CHANGES
++++ b/CHANGES
+@@ -18,9 +18,10 @@ Features added
+ * #10755: linkcheck: Check the source URL of raw directives that use the ``url``
+   option.
+ * #10781: Allow :rst:role:`ref` role to be used with definitions and fields.
+-* #10717: HTML Search: Increase priority for full title and 
++* #10717: HTML Search: Increase priority for full title and
+   subtitle matches in search results
+ * #10718: HTML Search: Save search result score to the HTML element for debugging
++* #10673: Make toctree accept 'genindex', 'modindex' and 'search' docnames
+ 
+ Bugs fixed
+ ----------
+diff --git a/doc/usage/restructuredtext/directives.rst b/doc/usage/restructuredtext/directives.rst
+index 4029b04e6..4a5056ecf 100644
+--- a/doc/usage/restructuredtext/directives.rst
++++ b/doc/usage/restructuredtext/directives.rst
+@@ -95,6 +95,13 @@ tables of contents.  The ``toctree`` directive is the central element.
+    You can also add external links, by giving an HTTP URL instead of a document
+    name.
+ 
++   .. versionchanged:: 5.2
++
++      The :ref:`special document names <special-names>` ``genindex``,
++      ``modindex`` and ``search`` can be given instead of a document name too;
++      they link to the general index, the module index and the search page,
++      respectively.
++
+    **Section numbering**
+ 
+    If you want to have section numbers even in HTML output, give the
+@@ -220,6 +227,8 @@ tables of contents.  The ``toctree`` directive is the central element.
+    .. versionchanged:: 1.3
+       Added "caption" and "name" option.
+ 
++.. _special-names:
++
+ Special names
+ ^^^^^^^^^^^^^
+ 
+@@ -244,6 +253,16 @@ The special document names (and pages generated for them) are:
+   JavaScript to full-text search the generated documents for search words; it
+   should work on every major browser that supports modern JavaScript.
+ 
++  These names can be used in a :rst:dir:`toctree` directive to add a link to
++  the corresponding page to the table of contents, like this::
++
++     .. toctree::
++        :caption: Indices
++
++        genindex
++        modindex
++        search
++
+ * every name beginning with ``_``
+ 
+   Though few such names are currently used by Sphinx, you should not
+diff --git a/sphinx/directives/other.py b/sphinx/directives/other.py
+index 35e16e623..fa8fc191a 100644
+--- a/sphinx/directives/other.py
++++ b/sphinx/directives/other.py
+@@ -77,10 +77,11 @@ class TocTree(SphinxDirective):
+         return ret
+ 
+     def parse_content(self, toctree: addnodes.toctree) -> List[Node]:
++        generated_docnames = frozenset(self.env.domains['std'].initial_data['labels'].keys())
+         suffixes = self.config.source_suffix
+ 
+         # glob target documents
+-        all_docnames = self.env.found_docs.copy()
++        all_docnames = self.env.found_docs.copy() | generated_docnames
+         all_docnames.remove(self.env.docname)  # remove current document
+ 
+         ret: List[Node] = []
+@@ -95,6 +96,9 @@ class TocTree(SphinxDirective):
+                 patname = docname_join(self.env.docname, entry)
+                 docnames = sorted(patfilter(all_docnames, patname))
+                 for docname in docnames:
++                    if docname in generated_docnames:
++                        # don't include generated documents in globs
++                        continue
+                     all_docnames.remove(docname)  # don't include it again
+                     toctree['entries'].append((None, docname))
+                     toctree['includefiles'].append(docname)
+@@ -118,7 +122,7 @@ class TocTree(SphinxDirective):
+                 docname = docname_join(self.env.docname, docname)
+                 if url_re.match(ref) or ref == 'self':
+                     toctree['entries'].append((title, ref))
+-                elif docname not in self.env.found_docs:
++                elif docname not in self.env.found_docs | generated_docnames:
+                     if excluded(self.env.doc2path(docname, False)):
+                         message = __('toctree contains reference to excluded document %r')
+                         subtype = 'excluded'
+diff --git a/sphinx/environment/adapters/toctree.py b/sphinx/environment/adapters/toctree.py
+index 9678e3c7c..acb06878c 100644
+--- a/sphinx/environment/adapters/toctree.py
++++ b/sphinx/environment/adapters/toctree.py
+@@ -1,6 +1,6 @@
+ """Toctree adapter for sphinx.environment."""
+ 
+-from typing import TYPE_CHECKING, Any, Iterable, List, Optional, cast
++from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple, cast
+ 
+ from docutils import nodes
+ from docutils.nodes import Element, Node
+@@ -54,6 +54,10 @@ class TocTree:
+         """
+         if toctree.get('hidden', False) and not includehidden:
+             return None
++        # the virtual documents that are generated by Sphinx itself,
++        # e.g. the general index, the module index and the search page
++        generated_docnames: Dict[str, Tuple[str, str, str]] = (
++            self.env.domains['std'].initial_data['labels'].copy())
+ 
+         # For reading the following two helper function, it is useful to keep
+         # in mind the node structure of a toctree (using HTML-like node names
+@@ -139,6 +143,17 @@ class TocTree:
+                         item = nodes.list_item('', para)
+                         # don't show subitems
+                         toc = nodes.bullet_list('', item)
++                    elif ref in generated_docnames:
++                        # a virtual document generated by Sphinx, e.g. the general
++                        # index: link to it and don't show any subitems
++                        refdoc, _, sectionname = generated_docnames[ref]
++                        if not title:
++                            title = sectionname
++                        reference = nodes.reference('', title, internal=True,
++                                                    refuri=refdoc, anchorname='')
++                        para = addnodes.compact_paragraph('', '', reference)
++                        item = nodes.list_item('', para)
++                        toc = nodes.bullet_list('', item)
+                     else:
+                         if ref in parents:
+                             logger.warning(__('circular toctree references '
+diff --git a/sphinx/environment/collectors/toctree.py b/sphinx/environment/collectors/toctree.py
+index 52a8fd8d1..cb664648a 100644
+--- a/sphinx/environment/collectors/toctree.py
++++ b/sphinx/environment/collectors/toctree.py
+@@ -201,6 +201,7 @@ class TocTreeCollector(EnvironmentCollector):
+ 
+     def assign_figure_numbers(self, env: BuildEnvironment) -> List[str]:
+         """Assign a figure number to each figure under a numbered toctree."""
++        generated_docnames = frozenset(env.domains['std'].initial_data['labels'].keys())
+ 
+         rewrite_needed = []
+ 
+@@ -259,6 +260,9 @@ class TocTreeCollector(EnvironmentCollector):
+                         if url_re.match(subdocname) or subdocname == 'self':
+                             # don't mess with those
+                             continue
++                        if subdocname in generated_docnames:
++                            # or these
++                            continue
+ 
+                         _walk_doc(subdocname, secnum)
+                 elif isinstance(subnode, nodes.Element):
+diff --git a/tests/test_environment_toctree.py b/tests/test_environment_toctree.py
+index 60a9826fd..8d5cfc0b9 100644
+--- a/tests/test_environment_toctree.py
++++ b/tests/test_environment_toctree.py
+@@ -346,3 +346,17 @@ def test_get_toctree_for_includehidden(app):
+ 
+     assert_node(toctree[2],
+                 [bullet_list, list_item, compact_paragraph, reference, "baz"])
++
++
++@pytest.mark.sphinx('xml', testroot='toctree-index')
++def test_toctree_index(app):
++    app.build()
++    toctree = app.env.tocs['index']
++    assert_node(toctree,
++                [bullet_list, ([list_item, (compact_paragraph,  # [0][0]
++                                            [bullet_list, (addnodes.toctree,  # [0][1][0]
++                                                           addnodes.toctree)])])])  # [0][1][1]
++    assert_node(toctree[0][1][1], addnodes.toctree,
++                caption="Indices", glob=False, hidden=False,
++                titlesonly=False, maxdepth=-1, numbered=0,
++                entries=[(None, 'genindex'), (None, 'modindex'), (None, 'search')])
+2026-11-05 21:57:31,064 - INFO - Git diff changed after running eval script
+2026-11-05 21:57:31,064 - INFO - Grading answer for sphinx-doc__sphinx-10673...
+2026-11-05 21:57:31,066 - INFO - report: {'sphinx-doc__sphinx-10673': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'infra_failure': False, 'tests_status': {'FAIL_TO_PASS': {'success': ['tests/test_environment_toctree.py::test_toctree_index'], 'failure': []}, 'PASS_TO_PASS': {'success': ['tests/test_environment_toctree.py::test_process_doc', 'tests/test_environment_toctree.py::test_glob', 'tests/test_environment_toctree.py::test_get_toc_for', 'tests/test_environment_toctree.py::test_get_toc_for_only', 'tests/test_environment_toctree.py::test_get_toc_for_tocdepth', 'tests/test_environment_toctree.py::test_get_toctree_for', 'tests/test_environment_toctree.py::test_get_toctree_for_collapse', 'tests/test_environment_toctree.py::test_get_toctree_for_maxdepth', 'tests/test_environment_toctree.py::test_get_toctree_for_includehidden'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for sphinx-doc__sphinx-10673: resolved: True
+2026-11-05 21:57:31,067 - INFO - Attempting to stop container sweb.eval.sphinx-doc__sphinx-10673.native...
+2026-11-05 21:57:46,246 - INFO - Container sweb.eval.sphinx-doc__sphinx-10673.native stopped successfully.
+2026-11-05 21:57:46,246 - INFO - Attempting to remove container sweb.eval.sphinx-doc__sphinx-10673.native...
+2026-11-05 21:57:46,302 - INFO - Container sweb.eval.sphinx-doc__sphinx-10673.native removed successfully.
