@@ -1,11 +1,10 @@
-"""Adapter 共用的小工具：依序累積 segment、自動編號、自動算 token、檢查 R 的來源。"""
+"""Build ordered segments and track incomplete output and reasoning provenance."""
 
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from . import tokens
 from .schema import Label, Role, Segment, SolverInfo, Speaker, ToolCall, Trajectory
 
 
@@ -20,8 +19,6 @@ def to_text(x: Any) -> str:
 class TrajectoryBuilder:
     def __init__(self) -> None:
         self.segments: list[Segment] = []
-        # 生成沒有正常結束的原因（例如被截斷）。有任何一筆，trajectory 就標成 incomplete，
-        # 抽樣時預設排除：「沒交出答案」和「交出錯的答案」是兩回事，不能混在錯誤類裡。
         self.incomplete: dict[str, str] = {}
         self._pending_call_order: list[str] = []
         self._call_segments: dict[str, list[Segment]] = {}
@@ -39,16 +36,17 @@ class TrajectoryBuilder:
             self._call_segments[key].append(segment)
         index = self._pending_call_order.index(key)
         if index:
-            # 只標記被跨越的呼叫與回傳，不改原始順序或切分規則。
             self.call_order_changed += 1
             self._reordered_calls.update(self._pending_call_order[: index + 1])
         self._pending_call_order.remove(key)
         for affected in self._reordered_calls:
             for related in self._call_segments.get(affected, []):
                 related.ambiguous = True
-                note = "工具回傳順序與呼叫順序不同；保留原紀錄位置，需稽核順序影響"
+                note = (
+                    "Tool results arrived out of call order; original order preserved."
+                )
                 if note not in (related.note or ""):
-                    related.note = (related.note + "；" if related.note else "") + note
+                    related.note = (related.note + "; " if related.note else "") + note
 
     def mark_incomplete(self, reason: str, detail: str = "") -> None:
         self.incomplete[reason] = detail
@@ -82,9 +80,6 @@ class TrajectoryBuilder:
             source_id=source_id,
             text=text,
             call=call,
-            n_tokens=tokens.count(text),
-            # 和 render 實際顯示的呼叫文字用同一個函式，確保 token 數一致
-            call_n_tokens=tokens.count(call.render()) if call else None,
             ambiguous=ambiguous,
             note=note,
             hidden=hidden or {},
@@ -120,7 +115,6 @@ class TrajectoryBuilder:
             solver=solver,
             label=label,
             segments=self.segments,
-            tokenizer=tokens.name(),
             meta=meta,
             hidden=hidden or {},
         )
@@ -129,25 +123,14 @@ class TrajectoryBuilder:
 def _check_reasoning_provenance(
     segments: list[Segment], solver: SolverInfo, meta: dict
 ) -> None:
-    """依「這條 trajectory 實際有沒有原生推理內容」修正 native_reasoning。
-
-    為什麼需要：之前 AgentRewardBench 依欄位名稱 reasoning 一律標成 full，
-    但實際有 28% 的 trajectory 那個欄位裡只有 <action>…</action>，根本沒有推理。
-    native_reasoning 是分析研究問題 (1) 時用來分層的依據，不能只看宣稱。
-
-    規則：
-    - 宣稱 full / summary，但沒有任何 kind=reasoning 的 R → 改成 none
-    - 宣稱 none / hidden，但實際有 kind=reasoning 的 R（例如自己跑 τ² 時抽到 reasoning_content）→ 改成 full
-    原本宣稱的值保留在 meta["native_reasoning_declared"]，並記錄原生推理的 token 數。
-    """
-    native = [
-        (text, n)
+    """Derive reasoning availability from recorded R, preserving the original declaration."""
+    native = any(
+        role == Role.R and text.strip()
         for s in segments
         if s.kind == "reasoning"
-        for role, text, n in s.pieces()
-        if role == Role.R and text.strip()
-    ]
-    # 重算時仍以最初宣稱為準，否則移除再恢復 R 會把 summary 誤升為 full。
+        for role, text in s.pieces()
+    )
+    # Preserve summaries when labels are removed and restored.
     declared = meta.setdefault("native_reasoning_declared", solver.native_reasoning)
     actual = declared
     if declared in ("full", "summary") and not native:
@@ -155,4 +138,3 @@ def _check_reasoning_provenance(
     elif declared in ("none", "hidden") and native:
         actual = "full"
     solver.native_reasoning = actual  # type: ignore[assignment]
-    meta["native_reasoning_tokens"] = sum(n for _, n in native)

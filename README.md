@@ -1,86 +1,115 @@
 # verification2
 
-USC EE599 Final Project：What Context Does a Verification Agent Really Need?
+Study which trajectory information improves agent verification.
 
-Pipeline 对接已实现，运行步骤和当前缺少的真实模型/数据材料见 [PIPELINE_GUIDE.md](PIPELINE_GUIDE.md)。
+**Solver → Jev E/R labels → verifier.** Use fresh τ²-Bench, SWE-bench Verified
+and ARB/WebArena episodes. Each benchmark has a frozen train/test split, and its
+first train task is the pilot. Develop with QERA on train; compare QA/QEA/QRA/QERA
+once on the held-out test set. Optionally, Jev also labels each E/R piece useful,
+misleading or irrelevant, and the QJevA view keeps only the useful ones
+(`--conditions "QA QEA QRA QERA QJevA"`).
 
-## 安裝
+- [Setup and commands](docs/FRESH_RUN.md)
+- [Experiment protocol](docs/FULL_RUN_PLAN.md)
+- [Data and prompt contract](docs/SPEC.md)
+- [Benchmark sources](docs/BENCHMARKS.md)
+- [Tests](tests/README.md)
 
-```bash
-git clone https://github.com/rxthlessbeats/verification2
-cd verification2
-uv sync
-uv run pre-commit install
-bash scripts/get_data.sh
-uv run pytest -q
-```
+## Quick start
 
-`get_data.sh` 會把資料下載到 `data/`，最後應顯示「錯誤 0 筆」；`pytest` 應顯示 38 passed。
-
-資料來源：[Google Drive](https://drive.google.com/drive/folders/1-Ahl5K9TkI4Ir_7RcduF9zjQ_TaF-GyK?usp=sharing)（不進 git）。
-
-## qera：benchmark 與統一接口
-
-### 資料
-
-| Benchmark | 類型 | 狀態 | 檔案 |
-|---|---|---|---|
-| τ²-Bench | 工具使用 | ✅ 可用，正確 / 錯誤各 250 | `data/tau2_bench.balanced.jsonl` |
-| SWE-bench Verified | 軟體工程 | ✅ 可用，各 82 | `data/swebench_verified.balanced.jsonl` |
-| AgentRewardBench | 網頁操作 | ✅ 可用，各 250 | `data/agentrewardbench.balanced.jsonl` |
-
-組上決定只用這 3 個 benchmark（MuSiQue、BrowseComp-Plus、AppWorld 已移除）。各 benchmark 說明見 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)，QERA 切分規則見 [`docs/SPEC.md`](docs/SPEC.md)。
-
-### 接口用法
-
-```python
-from qera.cli import read_jsonl
-from qera.render import build_verifier_input, selector_view
-
-for traj in read_jsonl(["data/tau2_bench.balanced.jsonl"]):
-    traj.label.correct  # 標籤：True / False
-    build_verifier_input(traj, "QEA").text  # 條件：QERA / QA / QEA
-    selector_view(traj)  # 給 Jev 的輸入（不含答案）
-    build_verifier_input(
-        traj, "QEJevA", selected_e=seg_ids
-    )  # Jev 選出的 E（seg_id 清單）
-```
-
-### 常用指令
-
-| 指令 | 用途 |
-|---|---|
-| `uv run qera stats data/*.balanced.jsonl` | 筆數、token 分佈 |
-| `uv run qera show data/tau2_bench.balanced.jsonl --index 0 --condition QEA` | 看 verifier 收到什麼 |
-| `uv run qera validate data/*.jsonl` | 檢查格式 |
-| `uv run qera apply-overrides data/x.jsonl overrides/kai.jsonl --out data/x.v2.jsonl` | 套用 Jev 分類 |
-| `uv run qera sample data/full/x.jsonl --per-class 250 --out data/x.balanced.jsonl` | 重新抽樣 |
-
-### 從頭重建資料（通常不需要）
+Needs Ubuntu/Debian with sudo, Python 3.12, [uv](https://docs.astral.sh/uv/)
+and GNU Make. Details for each step are in the [setup guide](docs/FRESH_RUN.md).
 
 ```bash
-uv run bash scripts/download_data.sh
-uv run bash scripts/convert_all.sh
+# 1. Install
+git clone git@github.com:rxthlessbeats/verification2.git && cd verification2
+cp .env.example .env && chmod 600 .env   # fill OPENCODE_API_KEY and JEV_API_KEY
+make setup                               # project, native benchmark runtimes, task data
+make setup-system                        # sudo: Docker, Compose, Chromium libraries
+docker info && docker compose version    # must work without sudo
+
+# 2. WebArena sites: download the 8 assets listed in docs/FRESH_RUN.md into one folder
+make web-setup ARCHIVES=/path/to/assets
+make web-serve                           # keep running in a second terminal
+
+# 3. Check readiness (no paid calls)
+scripts/experiment.sh tau2 doctor --benchmarks tau2_bench
+
+# 4. Run (paid API calls); --detach keeps going after the terminal closes
+scripts/experiment.sh tau2 pilot train --train 50 --jobs 8 --detach  # pilot must pass; QERA
+scripts/experiment.sh tau2 status                    # running or not, timing, latest lines
+scripts/experiment.sh tau2 train --train 50 --conditions "QA QEA QRA QERA"
+scripts/experiment.sh tau2 freeze test --jobs 8      # lock settings, then held-out test once
 ```
 
-第一行下載官方原始資料到 `raw/`，第二行轉換、驗證並抽樣。
+Each benchmark has one frozen train/test split in `data/splits/<benchmark>.json`:
+τ² uses its own split (178 train, 100 test). SWE-bench Verified has no official
+split, so all 500 tasks are split 50%/50% (250/250) by a shuffle seeded with 42.
+WebArena's 694 tasks with model-free grading are split the same way (347/347);
+AgentRewardBench's official split covers only 100 of them.
+Each file is written the first time its benchmark is used. `--train N` and
+`--test N` run the first N tasks per benchmark, balanced over domains (default
+all), and a larger N later only adds tasks. The pilot is each benchmark's first
+train task. `--jobs N` solves tasks and sends verifier checks N at a time.
 
-### 注意
+`NAME` is the experiment folder `outputs/NAME/`; its first run needs
+`--benchmarks`, which the folder then keeps. It holds a timestamped `run.log`, a
+`timing.txt` summary and `<pilot|train|test>/report.json`. Metrics are in
+`analysis*/summary.csv` in the same folder: false rejection, false acceptance and
+coverage per benchmark. Steps (`doctor pilot train freeze test`) run in the order
+given; a failed step stops the run, and a second run in the same folder is
+refused. `stop` ends a `--detach` run and removes its SWE containers. After a
+failure, fix the cause and add `--retry-failed`; completed episodes and API
+responses are reused. `scripts/experiment.sh --help` lists every option.
 
-- 資料檔不要 commit（`.gitignore` 已排除）。
+Solved trajectories are stored once per task and solver model in
+`data/trajectory/<benchmark>/<model>/`, and later runs only solve tasks that are
+missing there. To solve stored tasks again, for example after changing solver
+code, add `--output outputs/<new> --rerun all` (or `--rerun "swebench_verified"`);
+a stored trajectory is replaced only when the new solve succeeds. Stored
+trajectories are keyed by solver model and prompt, so after a solver prompt edit
+every task is solved again; Jev and verifier prompt edits reuse them.
 
-## Jev evidence selection (Kai)
+Pydantic validates inputs and model answers. Edit repo-owned prompts in
+[`prompts.yaml`](src/verification2/core/prompts.yaml). `.env` picks a model for
+each role (`SOLVER_MODEL`, `JEV_MODEL`, `VERIFIER_MODEL`); every model's
+endpoints, API key variable, limits and reasoning levels are in
+[`models.yaml`](src/verification2/core/models.yaml).
 
-Jev (TypeSafe, via Vercel AI Gateway) asks one four-way question per E
-candidate from `selector_view`: is this evidence irrelevant, context,
-confirms the candidate answer, or refutes it? usefulness = P(confirms) +
-P(refutes). The most useful candidates are packed into the token budget. The
-output is a selections JSONL that `verification2 run --selector file`
-consumes; per-candidate probabilities land next to it in `*.scores.jsonl`.
-
+```text
+src/verification2/
+  agents/       solver, Jev classification, verifier
+  benchmarks/   native runners, setup, readiness checks
+  core/         settings, schemas, prompts, API cache
+  data/         input validation, train/test splits
+  experiments/  collection, orchestration, protocol, reports
 ```
-# .env: AI_GATEWAY_API_KEY=...
-uv run python -m verification2.jev select --input data/tau2_bench.balanced.jsonl --budget 2048 --out selections/tau2_jev_2048.jsonl
-uv run verification2 run --input data/tau2_bench.balanced.jsonl --output outputs/tau2_jev --selector file --selections selections/tau2_jev_2048.jsonl --budget 2048 --backend dry-run
-uv run python -m verification2.jev usage      # Jev token / cost ledger
-```
+## Results: τ²-Bench
+
+All 278 tasks of τ²'s official split, one fresh solver episode each (run of
+2026-11-06 in `outputs/tau2`). Solver and verifier are `qwen3.8-flash` at the
+provider's default reasoning level, temperature 0, seed 42; Jev is
+`typesafe-ai/jev`. The verifier sees the question (Q), the final answer (A) and
+optionally the environment evidence (E) and the solver's reasoning (R) as labelled
+by Jev. False rejection is the share of natively correct episodes the verifier
+calls incorrect; false acceptance is the share of natively incorrect episodes it
+calls correct. Brackets are 95% bootstrap intervals over tasks (2,000 draws,
+conditions resampled together). Every check returned a valid verdict (coverage
+100%).
+
+| Split | View | Native correct / incorrect | False rejection | False acceptance |
+|---|---|---|---|---|
+| Train (178) | QERA | 159 / 19 | 11.3% [6.4, 16.8] | 63.2% [40.9, 83.3] |
+| Test (100) | QA | 87 / 13 | 9.2% [3.5, 15.7] | 69.2% [40.0, 93.3] |
+| Test (100) | QEA | 87 / 13 | 11.5% [5.6, 18.6] | 30.8% [7.1, 58.3] |
+| Test (100) | QRA | 87 / 13 | 12.6% [6.1, 20.3] | 61.5% [33.3, 88.9] |
+| Test (100) | QERA | 87 / 13 | 11.5% [5.6, 18.8] | 69.2% [41.7, 93.3] |
+
+Paired changes on the test set, in percentage points:
+
+| Change | False rejection | False acceptance |
+|---|---|---|
+| Add E (QA → QEA) | +2.3 [−3.4, +8.4] | −38.5 [−72.7, 0.0] |
+| Add R (QA → QRA) | +3.4 [−1.2, +8.6] | −7.7 [−35.7, +20.0] |
+| Add R to E (QEA → QERA) | 0.0 [−3.5, +3.4] | **+38.5 [+12.5, +66.7]** |
+| Add E to R (QRA → QERA) | −1.1 [−6.5, +3.5] | +7.7 [−18.2, +35.7] |
