@@ -1,0 +1,76 @@
+diff --git a/sympy/parsing/sympy_parser.py b/sympy/parsing/sympy_parser.py
+index 52711d1324..0d3b9d3513 100644
+--- a/sympy/parsing/sympy_parser.py
++++ b/sympy/parsing/sympy_parser.py
+@@ -1118,6 +1118,14 @@ class EvaluateFalseTransformer(ast.NodeTransformer):
+         'cosh', 'coth', 'csch', 'sech', 'sinh', 'tanh',
+         'exp', 'ln', 'log', 'sqrt', 'cbrt',
+     )
++    relationals = {
++        ast.Eq: 'Eq',
++        ast.NotEq: 'Ne',
++        ast.Lt: 'Lt',
++        ast.LtE: 'Le',
++        ast.Gt: 'Gt',
++        ast.GtE: 'Ge',
++    }
+ 
+     def flatten(self, args, func):
+         result = []
+@@ -1186,6 +1194,56 @@ def visit_BinOp(self, node):
+             return new_node
+         return node
+ 
++    def visit_Compare(self, node):
++        if len(node.ops) == 1 and node.ops[0].__class__ in self.relationals:
++            sympy_class = self.relationals[node.ops[0].__class__]
++            right = self.visit(node.comparators[0])
++            left = self.visit(node.left)
++
++            new_node = ast.Call(
++                func=ast.Name(id=sympy_class, ctx=ast.Load()),
++                args=[left, right],
++                keywords=[ast.keyword(arg='evaluate', value=ast.NameConstant(value=False, ctx=ast.Load()))],
++                starargs=None,
++                kwargs=None
++            )
++
++            return new_node
++
++        elif len(node.ops) > 1:
++            # handle chained comparisons like a < b < c
++            # as And(a < b, b < c)
++            args = []
++            left = self.visit(node.left)
++            for op, comparator in zip(node.ops, node.comparators):
++                right = self.visit(comparator)
++                if op.__class__ in self.relationals:
++                    sympy_class = self.relationals[op.__class__]
++                    new_node = ast.Call(
++                        func=ast.Name(id=sympy_class, ctx=ast.Load()),
++                        args=[left, right],
++                        keywords=[ast.keyword(arg='evaluate', value=ast.NameConstant(value=False, ctx=ast.Load()))],
++                        starargs=None,
++                        kwargs=None
++                    )
++                    args.append(new_node)
++                else:
++                    raise NotImplementedError(
++                        "Chained comparisons with operator %s are not "
++                        "supported" % op.__class__.__name__)
++                left = right
++
++            new_node = ast.Call(
++                func=ast.Name(id='And', ctx=ast.Load()),
++                args=args,
++                keywords=[ast.keyword(arg='evaluate', value=ast.NameConstant(value=False, ctx=ast.Load()))],
++                starargs=None,
++                kwargs=None
++            )
++
++            return new_node
++        return node
++
+     def visit_Call(self, node):
+         new_node = self.generic_visit(node)
+         if isinstance(node.func, ast.Name) and node.func.id in self.functions:

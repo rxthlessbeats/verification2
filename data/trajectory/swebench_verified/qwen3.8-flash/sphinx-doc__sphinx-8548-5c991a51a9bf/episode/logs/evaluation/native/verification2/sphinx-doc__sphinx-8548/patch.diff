@@ -1,0 +1,77 @@
+diff --git a/sphinx/ext/autodoc/__init__.py b/sphinx/ext/autodoc/__init__.py
+index ddfd2b365..52d61c593 100644
+--- a/sphinx/ext/autodoc/__init__.py
++++ b/sphinx/ext/autodoc/__init__.py
+@@ -2359,6 +2359,12 @@ class AttributeDocumenter(GenericAliasMixin, NewTypeMixin, SlotsMixin,  # type:
+                 pass
+ 
+     def get_doc(self, encoding: str = None, ignore: int = None) -> List[List[str]]:
++        # Check the attribute has a docstring-comment, which may be inherited from
++        # a base class (searched via the MRO).
++        comment = self.get_attribute_comment(self.parent)
++        if comment:
++            return [comment]
++
+         if self.object is INSTANCEATTR:
+             return []
+ 
+@@ -2374,6 +2380,10 @@ class AttributeDocumenter(GenericAliasMixin, NewTypeMixin, SlotsMixin,  # type:
+ 
+     def add_content(self, more_content: Optional[StringList], no_docstring: bool = False
+                     ) -> None:
++        # Disable analyzing attribute comment on Documenter.add_content() to control it on
++        # AttributeDocumenter.add_content()
++        self.analyzer = None
++
+         if more_content is None:
+             more_content = StringList()
+         self.update_content(more_content)
+diff --git a/sphinx/ext/autodoc/importer.py b/sphinx/ext/autodoc/importer.py
+index d6e73d36a..b3a66fcdc 100644
+--- a/sphinx/ext/autodoc/importer.py
++++ b/sphinx/ext/autodoc/importer.py
+@@ -14,7 +14,7 @@ import warnings
+ from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple
+ 
+ from sphinx.deprecation import RemovedInSphinx40Warning, deprecated_alias
+-from sphinx.pycode import ModuleAnalyzer
++from sphinx.pycode import ModuleAnalyzer, PycodeError
+ from sphinx.util import logging
+ from sphinx.util.inspect import (getannotations, getmro, getslots, isclass, isenumclass,
+                                  safe_getattr)
+@@ -307,6 +307,35 @@ def get_class_members(subject: Any, objpath: List[str], attrgetter: Callable,
+         except AttributeError:
+             pass
+ 
++    # append or complete the docstrings of attributes (including inherited ones)
++    # by searching the namespace of each class in the MRO.  autodoc caches the
++    # attribute docstrings using (namespace, attrname) as the key, so a base
++    # class' namespace has to be checked as well.  [sphinx issue 741]
++    for cls in getmro(subject):
++        try:
++            modname = safe_getattr(cls, '__module__')
++            qualname = safe_getattr(cls, '__qualname__')
++            cls_analyzer = ModuleAnalyzer.for_module(modname)
++            cls_analyzer.analyze()
++        except (AttributeError, PycodeError):
++            qualname = None
++            cls_analyzer = None
++
++        if not (cls_analyzer and qualname):
++            continue
++
++        for (ns, name), docstring in cls_analyzer.attr_docs.items():
++            if ns != qualname:
++                continue
++            if name not in members:
++                # otherwise unknown instance attribute
++                members[name] = ClassAttribute(cls, name, INSTANCEATTR,
++                                               '\n'.join(docstring))
++            elif docstring and members[name].docstring is None:
++                # the attribute is already known (e.g. enumerated via dir()),
++                # but its docstring was not found yet; complete it here.
++                members[name].docstring = '\n'.join(docstring)
++
+     if analyzer:
+         # append instance attributes (cf. self.attr1) if analyzer knows
+         namespace = '.'.join(objpath)
