@@ -58,7 +58,6 @@ def child_environment(key):
     }
     env["SOLVER_API_KEY"] = key.get_secret_value() if key else ""
     env["PYTHONPATH"] = str(ROOT / "src")
-    env["PLAYWRIGHT_BROWSERS_PATH"] = str(ROOT / "raw/browsers")
     env["HF_HOME"] = os.environ.get("HF_HOME", str(ROOT / "raw/huggingface"))
     env["PYTHON_DOTENV_DISABLED"] = "1"
     env["MSWEA_GLOBAL_CONFIG_DIR"] = str(ROOT / "raw/config/mini-swe-agent")
@@ -95,20 +94,64 @@ def collect_job(job, key, prompt_file=None):
             raise RuntimeError("Native tau2 collection failed; raw artifacts preserved")
         (trajectory,) = read_jsonl([job.output / "trajectories.jsonl"])
         return trajectory
-    runtime = "swe" if job.task.benchmark == "swebench_verified" else "web"
-    for name in ("mini", "swe") if runtime == "swe" else ("arb", "browser"):
+    workers = {
+        "swebench_verified": (
+            "swe",
+            ("mini", "swe"),
+            "verification2.benchmarks.swe_worker",
+        ),
+        "agentdojo": (
+            "agentdojo",
+            ("agentdojo",),
+            "verification2.benchmarks.agentdojo_worker",
+        ),
+        "appworld": (
+            "appworld",
+            ("appworld",),
+            "verification2.benchmarks.appworld_worker",
+        ),
+        "scienceworld": (
+            "scienceworld",
+            (),
+            "verification2.benchmarks.scienceworld_worker",
+        ),
+        "bird": (
+            "bird",
+            (),
+            "verification2.benchmarks.bird_worker",
+        ),
+    }
+    if job.task.benchmark not in workers:
+        raise ValueError("No native worker for " + job.task.benchmark)
+    runtime, sources, module = workers[job.task.benchmark]
+    for name in sources:
         source(name)  # Existing pinned files must still match before any paid call.
     python = ROOT / "raw/runtimes" / runtime / ".venv/bin/python"
     if not python.is_file():
         raise ValueError("Native runtime missing; run make setup")
     job.output.mkdir(parents=True)
     configuration = job.output / "job.json"
-    configuration.write_text(job.model_dump_json(indent=2) + "\n")
-    module = (
-        "verification2.benchmarks.swe_worker"
-        if runtime == "swe"
-        else "verification2.benchmarks.web_worker"
-    )
+    if job.task.benchmark == "appworld":
+        # Keep credentials and pydantic-v2 models out of the AppWorld (pydantic v1) process.
+        payload = {
+            "task": job.task.model_dump(mode="json"),
+            "seed": job.seed,
+            "model": job.model,
+            "endpoint": job.endpoint,
+            "output": str(job.output),
+            "cache_dir": str(job.cache_dir),
+            "solver_instruction": job.solver_instruction,
+            "reasoning_effort": job.reasoning_effort,
+            "appworld_root": str(ROOT / "raw/appworld-root"),
+            "prompt_path": str(
+                Path(__file__).resolve().parents[1]
+                / "benchmarks"
+                / "appworld_react_prompt.txt"
+            ),
+        }
+        configuration.write_text(json.dumps(payload, indent=2) + "\n")
+    else:
+        configuration.write_text(job.model_dump_json(indent=2) + "\n")
     with (job.output / "native.log").open("w", encoding="utf-8") as log:
         process = subprocess.run(
             [str(python), "-m", module, str(configuration)],
@@ -122,6 +165,15 @@ def collect_job(job, key, prompt_file=None):
         raise RuntimeError(
             "Native worker failed; inspect " + str(job.output / "native.log")
         )
+    if job.task.benchmark == "appworld":
+        from qera.adapters.appworld import convert_episode
+
+        episode = json.loads((job.output / "episode.json").read_text(encoding="utf-8"))
+        trajectory = convert_episode(episode, job.model, job.output.name)
+        (job.output / "trajectory.json").write_text(
+            trajectory.revalidate().model_dump_json() + "\n"
+        )
+        return trajectory
     return Trajectory.model_validate_json((job.output / "trajectory.json").read_text())
 
 
@@ -316,13 +368,11 @@ def collect(
                         "Fresh collection requires a new native outcome and self_generated provenance"
                     )
                 expected_id = (
-                    f"{task.domain}/{task.task_id}"
-                    if task.benchmark == "tau2_bench"
-                    else task.task_id
+                    f"{task.domain}/{task.task_id}" if task.domain else task.task_id
                 )
                 expected_label = (
                     "unit_tests"
-                    if task.benchmark == "swebench_verified"
+                    if task.benchmark in ("swebench_verified", "appworld", "bird")
                     else "env_reward"
                 )
                 if (
@@ -374,7 +424,9 @@ def collect(
     if backend == "http":
         summary.solver(results)
     if trajectories:
-        write_jsonl(trajectories, str(output / "trajectories.jsonl"))
+        source = output / "trajectories.jsonl"
+        write_jsonl(trajectories, str(source))
+        manifest["trajectories_sha256"] = file_hash(source)
     (output / "task_results.jsonl").write_text(
         "".join(json.dumps(r) + "\n" for r in rows)
     )

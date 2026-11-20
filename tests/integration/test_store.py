@@ -20,7 +20,7 @@ def test_each_task_is_solved_once_per_model_and_reused_by_later_collections(
     monkeypatch.setattr(collection, "collect_job", runner)
     assert solve(splits, tmp_path / "first", backend="http") == 0
     assert solve(splits, tmp_path / "second", backend="http") == 0
-    assert runner.call_count == 3
+    assert runner.call_count == len(BENCHMARKS)
     assert (tmp_path / "first/trajectories.jsonl").read_bytes() == (
         tmp_path / "second/trajectories.jsonl"
     ).read_bytes()
@@ -125,7 +125,8 @@ def test_rerun_solves_chosen_benchmarks_again_and_replaces_only_on_success(
         json.loads(r)
         for r in (tmp_path / "second/task_results.jsonl").read_text().splitlines()
     ]
-    assert sorted(map(str, (r["reused"] for r in rows))) == ["False", "store", "store"]
+    reused = [str(r["reused"]) for r in rows]
+    assert reused.count("False") == 1 and reused.count("store") == len(BENCHMARKS) - 1
     assert next(r for r in rows if not r["reused"])["stored"].endswith("(replaced)")
     replaced = entries["swebench_verified"].read_text()
 

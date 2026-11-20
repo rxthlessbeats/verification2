@@ -1,15 +1,14 @@
 # Experiment protocol
 
 Research which recorded information improves verification. Development tunes
-prompts and evidence definitions, not model weights. All three benchmarks count
+prompts and evidence definitions, not model weights. The five main benchmarks count
 equally; [setup and commands](FRESH_RUN.md) are separate.
 
 ## Tasks
 
 τ² uses its own train/test split (178/100). SWE-bench Verified (500 tasks) has
-no official split, and AgentRewardBench's covers only 100 WebArena tasks, so all
-500 SWE-bench tasks and all 694 WebArena tasks with model-free grading are split
-50%/50% by a shuffle seeded with 42. Splits are frozen in
+no official split, so those tasks are split 50%/50% by a shuffle seeded with 42.
+Splits are frozen in
 `data/splits/` before any outcome; a run may use the first N tasks of each
 partition, balanced over domains. The pilot is each benchmark's first train task.
 Run one solver episode per task. Never rebalance by solver success.
@@ -18,16 +17,16 @@ Use fresh episodes, not released histories.
 | Benchmark | Solver | Ground truth |
 |---|---|---|
 | τ² v1.0.1 | Native tool agent/user | Native environment/outcome evaluation |
-| SWE-bench Verified | Pinned mini-SWE-agent/Docker | Independent official test harness |
-| ARB/WebArena | ARB environment, pinned text-only BrowserGym DemoAgent/WebArena actions | Native WebArena evaluator; preselect tasks without model grading |
+| AgentDojo | Clean utility tasks in four application suites | Native task utility |
+| AppWorld | Python calls to simulated apps | Native state-based tests |
+| ScienceWorld | Text commands, easy setting | Simulator task completion |
+| BIRD | Read-only SQLite agent | Result-set execution match |
 
-ARB's saved human labels cannot grade new attempts. This custom WebArena task set
-uses its generation framework and is not the published full ARB score. No humans
-supply experiment labels. Unknown/fuzzy/model-based web graders are ineligible.
+No humans supply experiment labels.
 
 ## Workflow
 
-1. Pass the three disjoint pilots with native scores and readable recorded
+1. Pass each benchmark's pilot with a native score and readable recorded
    reasoning. Model names and usage tokens do not prove reasoning availability.
    Fix capture/protocol problems before formal collection, then freeze the solver.
 2. Collect and freeze training episodes once, including tools, observations,
@@ -65,5 +64,4 @@ Report per benchmark and equal-weight macro averages, plus paired task-bootstrap
 95% intervals: 2,000 draws, seed 42; omit zero-denominator draws.
 
 Keep raw API usage/cost and stage timing, including recovery. Unknown cost stays
-unknown. No local counters, evidence budgets, silent truncation or pilot-specific
-caps. Native horizons/tool/test timeouts remain. Pilots establish operation only.
+unknown. Record missing terminal submissions as unscored collection errors. BIRD allows eight SQL turns. ScienceWorld uses its native move limit and allows up to that limit plus one solver turn. Pilots establish operation only.

@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if ! command -v apt-get >/dev/null; then
-  echo 'Install Docker Engine and Playwright Chromium system dependencies for your OS, then run make setup.' >&2
+  echo 'Install Docker Engine for your OS, then run make setup.' >&2
   exit 1
 fi
 sudo apt-get update
@@ -16,7 +16,4 @@ else
   exit 1
 fi
 sudo systemctl enable --now docker
-if [[ -x raw/runtimes/web/.venv/bin/python ]]; then
-  sudo raw/runtimes/web/.venv/bin/python -m playwright install-deps chromium
-fi
 echo 'Docker must be usable by your execution account. Verify with docker info, then scripts/experiment.sh NAME doctor.'

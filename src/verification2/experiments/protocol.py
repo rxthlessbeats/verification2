@@ -163,10 +163,10 @@ def check_stage(trajectories, args, prompts, stage):
             for t in heldout
         ):
             raise ValueError("Jev prompt differs from the frozen held-out protocol")
-    elif (
-        digest(prompts.verifier.model_dump(mode="json"))
-        != protocol.verifier_prompt_hash
-        or list(args.conditions) != protocol.conditions
+    elif digest(
+        prompts.verifier.model_dump(mode="json")
+    ) != protocol.verifier_prompt_hash or not set(args.conditions).issubset(
+        protocol.conditions
     ):
         raise ValueError(
             "Verifier prompt/conditions differ from the frozen held-out protocol"
@@ -231,7 +231,10 @@ def main(argv=None):
         conditions=args.conditions,
     )
     if args.output.exists():
-        if Protocol.model_validate_json(args.output.read_text()) != protocol:
+        frozen = Protocol.model_validate_json(args.output.read_text())
+        if not set(protocol.conditions).issubset(
+            frozen.conditions
+        ) or frozen != protocol.model_copy(update={"conditions": frozen.conditions}):
             raise ValueError("Existing protocol differs; it was preserved")
     else:
         args.output.parent.mkdir(parents=True, exist_ok=True)

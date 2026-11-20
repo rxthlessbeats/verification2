@@ -11,7 +11,6 @@ from tests.support import CHAT, fresh_splits, registry, sample, solve
 from tests.support import fake_native_episode as fresh
 from verification2.agents.classification import classification_view
 from verification2.agents.verifier import Backend, main
-from verification2.benchmarks import web_setup
 from verification2.core.prompts import load_prompts
 from verification2.core.registry import resolve
 from verification2.data.split import BENCHMARKS, select, split_id
@@ -123,7 +122,7 @@ def test_completed_solver_episodes_are_reused_and_modified_tasks_fail_before_cal
     assert solve(splits, output, backend="http") == 0
     before = (output / "trajectories.jsonl").read_bytes()
     assert solve(splits, output, backend="http") == 0
-    assert runner.call_count == 3
+    assert runner.call_count == len(BENCHMARKS)
     assert (output / "trajectories.jsonl").read_bytes() == before
     assert all(
         t.solver.origin == "self_generated"
@@ -133,7 +132,7 @@ def test_completed_solver_episodes_are_reused_and_modified_tasks_fail_before_cal
     (tmp_path / task.source).write_text("[]")
     with pytest.raises(ValueError, match="missing"):
         solve(splits, tmp_path / "changed", backend="http")
-    assert runner.call_count == 3
+    assert runner.call_count == len(BENCHMARKS)
 
 
 @pytest.mark.integration
@@ -147,11 +146,11 @@ def test_failed_native_episodes_never_become_incorrect_labels_or_retry_automatic
     assert solve(splits, output, backend="http") == 1
     assert not (output / "trajectories.jsonl").exists()
     assert solve(splits, output, backend="http") == 1
-    assert runner.call_count == 3
+    assert runner.call_count == len(BENCHMARKS)
     monkeypatch.setattr(collection, "collect_job", fresh)
     assert solve(splits, output, backend="http", retry_failed=True) == 0
     assert solve(splits, output, backend="http") == 0
-    assert len(list((output / "episodes").glob("*.attempt1"))) == 3
+    assert len(list((output / "episodes").glob("*.attempt1"))) == len(BENCHMARKS)
 
 
 @pytest.mark.integration
@@ -195,6 +194,12 @@ def test_heldout_requires_frozen_protocol_and_rejects_prompt_changes(
         max_tokens=None,
     )
     protocol.check_stage([trajectory], args, load_prompts(), "verifier")
+    args.conditions = ["QEA"]
+    protocol.check_stage([trajectory], args, load_prompts(), "verifier")
+    with pytest.raises(ValueError, match="conditions"):
+        args.conditions = ["QJevA"]
+        protocol.check_stage([trajectory], args, load_prompts(), "verifier")
+    args.conditions = ["QEA"]
     changed = load_prompts().model_copy(deep=True)
     changed.verifier.instruction += " edited after freeze"
     with pytest.raises(ValueError, match="differ"):
@@ -216,31 +221,12 @@ def test_jev_benchmark_guidance_is_resolved_without_adapter_label_hints(tmp_path
     prompts = load_prompts()
     assert (
         prompts.classification("swebench_verified").criteria
-        == prompts.classification("agentrewardbench").criteria
+        == prompts.classification("agentdojo").criteria
     )
     assert (
         prompts.classification("swebench_verified").instruction
-        != prompts.classification("agentrewardbench").instruction
+        != prompts.classification("agentdojo").instruction
     )
-
-
-@pytest.mark.integration
-def test_website_reset_preserves_foreign_containers_and_records_native_failures(
-    tmp_path, monkeypatch
-):
-    state = tmp_path / "websites"
-    state.mkdir()
-    actual = {"shopping": "foreign-id"}
-    monkeypatch.setattr(web_setup, "inspect_containers", lambda: dict(actual))
-    native = Mock(side_effect=RuntimeError("native setup failed"))
-    monkeypatch.setattr(web_setup, "run", native)
-    with pytest.raises(ValueError, match="ownership changed"):
-        web_setup.recreate(state, {"containers": {"shopping": "owned-id"}})
-    native.assert_not_called()
-    with pytest.raises(RuntimeError, match="native setup failed"):
-        web_setup.recreate(state, {"containers": actual})
-    saved = json.loads((state / "setup.json").read_text())
-    assert saved["status"] == "failed" and saved["containers"] == actual
 
 
 @pytest.mark.integration

@@ -1,5 +1,6 @@
 import json
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 import yaml
@@ -14,9 +15,7 @@ from verification2.experiments import run as experiment
 
 
 @pytest.mark.e2e
-def test_fresh_three_benchmark_pilot_resume_and_frozen_heldout_matrix(
-    tmp_path, monkeypatch
-):
+def test_fresh_benchmark_pilot_resume_and_frozen_heldout_matrix(tmp_path, monkeypatch):
     configure(monkeypatch)
     monkeypatch.setattr(
         protocol, "runtime_hashes", lambda **kwargs: {"native": "test-lock"}
@@ -74,11 +73,32 @@ def test_fresh_three_benchmark_pilot_resume_and_frozen_heldout_matrix(
     monkeypatch.setattr("urllib.request.urlopen", response)
     pilot = tmp_path / "pilot"
     flags = [*benchmarks, "--output", str(pilot)]
+    assert experiment.main([*flags, "--stage", "verifier"]) == 1
+    assert not native_calls and not api_calls
+    assert experiment.main([*flags, "--stage", "solver"]) == 0
+    assert len(native_calls) == len(BENCHMARKS) and not api_calls
+    assert experiment.main([*flags, "--stage", "verifier"]) == 1
+    assert not api_calls
+    assert experiment.main([*flags, "--stage", "jev"]) == 0
+    assert api_calls and all("questions" in r for r in api_calls)
+    after_jev = len(api_calls)
+    assert (
+        experiment.main([*flags, "--stage", "verifier", "--conditions", "QA", "QRA"])
+        == 0
+    )
+    assert len(native_calls) == len(BENCHMARKS)
+    assert len(api_calls[after_jev:]) == 2 * len(BENCHMARKS)
+    assert all("questions" not in r for r in api_calls[after_jev:])
+    verdicts = [
+        json.loads(line)
+        for line in (pilot / "verifier/results.jsonl").read_text().splitlines()
+    ]
+    assert {v["condition"] for v in verdicts} == {"QA", "QRA"}
     assert experiment.main(flags) == 0
-    assert len(native_calls) == 3
+    assert len(native_calls) == len(BENCHMARKS)
     before = len(api_calls)
     assert experiment.main(flags) == 0
-    assert len(native_calls) == 3 and len(api_calls) == before
+    assert len(native_calls) == len(BENCHMARKS) and len(api_calls) == before
     report = json.loads((pilot / "report.json").read_text())
     assert report["status"] == "passed" and all(report["readable_reasoning"].values())
     train = tmp_path / "train"
@@ -97,12 +117,31 @@ def test_fresh_three_benchmark_pilot_resume_and_frozen_heldout_matrix(
     changed.write_text(yaml.safe_dump(bundle.model_dump(mode="json")))
     assert experiment.main([*training, "--prompt-file", str(changed)]) == 0
     assert len(native_calls) == native_count
-    assert len(api_calls) == api_count + 3 and all(
+    assert len(api_calls) == api_count + len(BENCHMARKS) and all(
         "questions" not in r for r in api_calls[api_count:]
     )
     final_protocol = tmp_path / "protocol.json"
     protocol.main([*benchmarks, "--output", str(final_protocol)])
     heldout = tmp_path / "test"
+    test_flags = [
+        *benchmarks,
+        "--output",
+        str(heldout),
+        "--partition",
+        "test",
+        "--protocol",
+        str(final_protocol),
+    ]
+    assert experiment.main([*test_flags, "--stage", "solver"]) == 0
+    after_solver = len(native_calls)
+    assert experiment.main([*test_flags, "--stage", "jev"]) == 0
+    assert (
+        experiment.main(
+            [*test_flags, "--stage", "verifier", "--conditions", "QA", "QEA"]
+        )
+        == 0
+    )
+    assert len(native_calls) == after_solver
     assert (
         experiment.main(
             [
@@ -127,19 +166,16 @@ def test_fresh_three_benchmark_pilot_resume_and_frozen_heldout_matrix(
     records = list(read_jsonl([heldout / "solver/trajectories.jsonl"]))
     order = [t.key for t in select(splits, "test")]
     assert [t.meta["native_task_key"] for t in records] == order
-    assert {t.benchmark for t in records} == {
-        "tau2_bench",
-        "swebench_verified",
-        "agentrewardbench",
-    }
+    assert {t.benchmark for t in records} == set(BENCHMARKS)
     assert all(
         t.split == "test" and t.solver.origin == "self_generated" for t in records
     )
-    assert set(native_calls[:3]).isdisjoint(native_calls[3:])
-    results = [
-        json.loads(line)
-        for line in (heldout / "verifier/results.jsonl").read_text().splitlines()
-    ]
+    assert set(native_calls[: len(BENCHMARKS)]).isdisjoint(
+        native_calls[len(BENCHMARKS) :]
+    )
+    full_report = json.loads((heldout / "report.json").read_text())
+    verified = Path(full_report["stages"]["verifier"]["artifact"])
+    results = [json.loads(line) for line in verified.read_text().splitlines()]
     assert [(r["native_task_key"], r["condition"]) for r in results] == [
         (key, c) for key in order for c in ("QA", "QEA", "QRA", "QERA")
     ]
@@ -147,20 +183,18 @@ def test_fresh_three_benchmark_pilot_resume_and_frozen_heldout_matrix(
     assert "smoke-test-secret" not in "".join(
         p.read_text(encoding="utf-8-sig") for p in heldout.rglob("*.json")
     )
-    analysis = json.loads((heldout / "analysis/report.json").read_text())
+    analysis = json.loads((Path(full_report["analysis"]) / "report.json").read_text())
     assert (
         analysis["split_id"] == split_id(splits)
         and analysis["error_result_records"] == 0
     )
     results[0]["split_id"] = "another-split"
-    (heldout / "verifier/results.jsonl").write_text(
-        "".join(json.dumps(r) + "\n" for r in results)
-    )
+    verified.write_text("".join(json.dumps(r) + "\n" for r in results))
     with pytest.raises(ValueError, match="split/partition"):
         reporting.main(
             [
                 "--input",
-                str(heldout / "verifier"),
+                str(verified.parent),
                 *benchmarks,
                 "--partition",
                 "test",

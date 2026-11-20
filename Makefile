@@ -1,11 +1,31 @@
 SHELL := /bin/bash
 .DELETE_ON_ERROR:
 
-.PHONY: help setup setup-system web-setup web-serve test test-unit test-integration test-e2e check
+BENCHMARKS ?= $(BENCHMARK)
+empty :=
+space := $(empty) $(empty)
+RUN ?= full-$(subst $(space),-,$(strip $(BENCHMARKS)))
+JOBS ?= 1
+STAGE ?= all
+VIEWS ?= QA QEA QRA QERA
+
+.PHONY: help setup setup-system test test-unit test-integration test-e2e check full-train full-test
 help:
-	@echo 'Setup: setup, setup-system, web-setup ARCHIVES=/path/to/assets, then web-serve'
+	@echo 'Setup: setup, setup-system'
 	@echo 'Checks: test, test-unit, test-integration, test-e2e, check'
-	@echo 'Experiments: scripts/experiment.sh NAME [STEP...]; see scripts/experiment.sh --help'
+	@echo 'Experiments: full-train, full-test BENCHMARK=bird (or BENCHMARKS="bird appworld"), STAGE=all|solver|jev|verifier, VIEWS="QA QEA QRA QERA"'
+
+full-train full-test: require-benchmark
+
+.PHONY: require-benchmark
+require-benchmark:
+	$(if $(strip $(BENCHMARKS)),,$(error Choose a benchmark with BENCHMARK=bird or BENCHMARKS="bird appworld"))
+
+full-train:
+	bash scripts/experiment.sh "$(RUN)" pilot train --benchmarks "$(BENCHMARKS)" --train all --stage "$(STAGE)" --conditions "$(VIEWS)" --jobs "$(JOBS)"
+
+full-test:
+	bash scripts/experiment.sh "$(RUN)" freeze test --benchmarks "$(BENCHMARKS)" --test all --stage "$(STAGE)" --conditions "$(VIEWS)" --jobs "$(JOBS)"
 
 setup:
 	uv sync --no-cache --locked
@@ -13,12 +33,6 @@ setup:
 
 setup-system:
 	bash scripts/setup_system.sh
-
-web-setup:
-	uv run --no-cache python -m verification2.benchmarks.web_setup $(if $(ARCHIVES),--archives $(ARCHIVES),)
-
-web-serve:
-	uv run --no-cache python -m verification2.benchmarks.web_setup --serve
 
 test:
 	uv run --no-cache --offline --no-sync pytest -q

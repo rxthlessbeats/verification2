@@ -6,8 +6,6 @@ import os
 import shutil
 import socket
 import subprocess
-import urllib.error
-import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -21,27 +19,22 @@ from .setup import ROOT, SOURCES, source
 NEEDS = {
     "tau2_bench": {"tau2"},
     "swebench_verified": {"mini", "swe", "docker"},
-    "agentrewardbench": {"arb", "browser", "web", "docker"},
+    "agentdojo": {"agentdojo"},
+    "appworld": {"appworld"},
+    "scienceworld": {"scienceworld"},
+    "bird": {"bird"},
 }
 LOCKS = {
     "tau2": "raw/tau2-bench/uv.lock",
     "swe": "raw/runtimes/swe/requirements.lock",
-    "web": "raw/runtimes/web/requirements.lock",
+    "agentdojo": "raw/runtimes/agentdojo/requirements.lock",
+    "appworld": "raw/runtimes/appworld/requirements.lock",
+    "scienceworld": "raw/runtimes/scienceworld/requirements.lock",
+    "bird": "raw/runtimes/bird/requirements.lock",
 }
 
-WEB_ENV = (
-    "WA_HOMEPAGE",
-    "WA_SHOPPING",
-    "WA_SHOPPING_ADMIN",
-    "WA_REDDIT",
-    "WA_GITLAB",
-    "WA_WIKIPEDIA",
-    "WA_MAP",
-    "WA_FULL_RESET",
-)
 
-
-def check(network=False, benchmarks=BENCHMARKS):
+def check(network=False, benchmarks=BENCHMARKS, roles=("SOLVER", "JEV", "VERIFIER")):
     from ..experiments.collection import child_environment
     from ..experiments.protocol import runtime_hashes
 
@@ -83,7 +76,10 @@ def check(network=False, benchmarks=BENCHMARKS):
     for name, relative in {
         "tau2": "raw/tau2-bench/.venv/bin/python",
         "swe": "raw/runtimes/swe/.venv/bin/python",
-        "web": "raw/runtimes/web/.venv/bin/python",
+        "agentdojo": "raw/runtimes/agentdojo/.venv/bin/python",
+        "appworld": "raw/runtimes/appworld/.venv/bin/python",
+        "scienceworld": "raw/runtimes/scienceworld/.venv/bin/python",
+        "bird": "raw/runtimes/bird/.venv/bin/python",
     }.items():
         if name not in needs:
             continue
@@ -91,7 +87,10 @@ def check(network=False, benchmarks=BENCHMARKS):
         module = {
             "tau2": "tau2",
             "swe": "swebench,minisweagent",
-            "web": "browsergym,agent_reward_bench",
+            "agentdojo": "agentdojo",
+            "appworld": "appworld",
+            "scienceworld": "scienceworld,jdk4py",
+            "bird": "sqlite3",
         }[name]
         ready = python.exists() and probe([str(python), "-c", "import " + module])
         record(
@@ -124,16 +123,26 @@ def check(network=False, benchmarks=BENCHMARKS):
             if ready
             else "Docker CLI/daemon unavailable; run make setup-system on the execution host",
         )
-    if "web" in needs:
+    for benchmark in benchmarks:
+        if benchmark == "tau2_bench":
+            continue
+        path = ROOT / "raw/tasks" / (benchmark + ".jsonl")
+        record("tasks:" + benchmark, path.is_file(), str(path))
+    if "bird" in benchmarks:
+        databases = ROOT / "raw/bird/databases"
+        ready = databases.is_dir() and any(databases.rglob("*.sqlite"))
         record(
-            "docker-compose",
-            bool(docker) and probe([docker, "compose", "version"]),
-            "Docker Compose v2 required for native websites",
+            "bird-databases",
+            ready,
+            "ready" if ready else "missing; run make setup",
         )
-    for benchmark in ("swebench_verified", "agentrewardbench"):
-        if benchmark in benchmarks:
-            path = ROOT / "raw/tasks" / (benchmark + ".jsonl")
-            record("tasks:" + benchmark, path.is_file(), str(path))
+    if "appworld" in needs:
+        data = ROOT / "raw/appworld-root/data/datasets/train.txt"
+        record(
+            "appworld-data",
+            data.is_file(),
+            "ready" if data.is_file() else "missing; run make setup",
+        )
     hashes = runtime_hashes()
     for name, path in LOCKS.items():
         if name in needs:
@@ -142,31 +151,7 @@ def check(network=False, benchmarks=BENCHMARKS):
                 hashes[path] != "missing",
                 "present" if hashes[path] != "missing" else "missing; run make setup",
             )
-    for name in WEB_ENV if "web" in needs else ():
-        value = os.environ.get(name)
-        record(
-            "web:" + name,
-            bool(value),
-            "configured" if value else "missing; see .env.example and make web-setup",
-        )
-        if network and value:
-            try:
-                with urllib.request.urlopen(
-                    value.rstrip("/") + "/status" if name == "WA_FULL_RESET" else value,
-                    timeout=5,
-                ) as response:
-                    ready = response.status == 200 and (
-                        name != "WA_FULL_RESET"
-                        or response.read().strip() == b"Ready for duty!"
-                    )
-                record(
-                    "reachable:" + name,
-                    ready,
-                    "responding" if ready else "native service is not ready",
-                )
-            except (ValueError, OSError) as exc:
-                record("reachable:" + name, False, type(exc).__name__)
-    for role in ("SOLVER", "JEV", "VERIFIER"):
+    for role in roles:
         model = os.environ.get(role + "_MODEL")
         try:
             resolved = resolve(role.lower(), model)
@@ -206,27 +191,6 @@ def check(network=False, benchmarks=BENCHMARKS):
                 record("dns:" + role, True, host)
             except OSError as exc:
                 record("dns:" + role, False, type(exc).__name__ + ": " + str(exc))
-    if "web" in needs:
-        browsers = ROOT / "raw/browsers"
-        python = ROOT / "raw/runtimes/web/.venv/bin/python"
-        ready = (
-            python.is_file()
-            and browsers.exists()
-            and probe(
-                [
-                    str(python),
-                    "-c",
-                    "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop()",
-                ]
-            )
-        )
-        record(
-            "chromium",
-            ready,
-            "headless launch passed"
-            if ready
-            else "missing browser/runtime or system libraries; run make setup and make setup-system",
-        )
     return {
         "ready": all(row["ok"] for row in rows),
         "benchmarks": list(benchmarks),

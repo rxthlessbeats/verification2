@@ -9,7 +9,10 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import zipfile
 from pathlib import Path
+
+from qera.jsonl import read as read_rows
 
 from ..core.config import Name, Settings
 
@@ -18,6 +21,23 @@ ROOT = _checkout if (_checkout / "src/verification2").is_dir() else Path.cwd()
 SOURCES = json.loads(Path(__file__).with_name("native_sources.json").read_text())
 # The pinned v5 harness needs image/log_parser/eval_script fields, absent from princeton-nlp copies.
 SWE_TASK_REVISION = "78f471bf655a3137b2e8a75af1501690ec009ec3"
+APPWORLD_DATA_URL = "https://s3.us-west-2.amazonaws.com/appworld.dev/data-0.1.0.bundle"
+APPWORLD_DATA_SHA256 = (
+    "fd9f9608c2ec71ed0ac25c3633a738b9129a318a129e31230425b9188e508250"
+)
+AGENTDOJO_VERSION = "v1.2.2"
+BIRD_TRAIN_ZIP = 8919543554
+BIRD_DEV_ZIP = 346207293
+BIRD_ANNOTATIONS = {
+    "train.jsonl": (
+        "https://huggingface.co/datasets/birdsql/bird23-train-filtered/resolve/main/data/train-00000-of-00001.jsonl",
+        "2ee64aa593e1adc59be7d5b9ce2395372a8ee27fdd94a3fb4d2fe09f3cd34bc8",
+    ),
+    "mini_dev_sqlite.jsonl": (
+        "https://huggingface.co/datasets/birdsql/bird_mini_dev/resolve/main/data/mini_dev_sqlite.jsonl",
+        "926af2a0d1b47e5d0d15a7aa8a34d4721007f4550a881555b6a89496b54a2606",
+    ),
+}
 
 
 class Source(Settings):
@@ -145,33 +165,217 @@ def install_runtime(name, requirements):
     return python
 
 
-def export_tasks(python, benchmark):
+def export_tasks(python, benchmark, env=None):
     target = ROOT / "raw/tasks" / (benchmark + ".jsonl")
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         print(f"Reusing task data: {target}", flush=True)
         return
-    code = (
-        "from datasets import load_dataset; import sys; "
-        f"load_dataset('SWE-bench/SWE-bench_Verified', split='test', revision='{SWE_TASK_REVISION}').to_json(sys.argv[1])"
-        if benchmark == "swebench_verified"
-        else "import importlib.util,json,sys; from pathlib import Path; "
-        "p=Path(importlib.util.find_spec('webarena').origin).parent/'test.raw.json'; "
-        "rows=json.loads(p.read_text()); "
-        "Path(sys.argv[1]).write_text(''.join(json.dumps(r)+'\\n' for r in rows))"
-    )
+    if benchmark == "swebench_verified":
+        code = (
+            "from datasets import load_dataset; import sys; "
+            f"load_dataset('SWE-bench/SWE-bench_Verified', split='test', revision='{SWE_TASK_REVISION}').to_json(sys.argv[1])"
+        )
+    elif benchmark == "agentdojo":
+        code = (
+            "import json,sys; from pathlib import Path; "
+            f"from agentdojo.task_suite.load_suites import get_suites; "
+            f"suites=get_suites('{AGENTDOJO_VERSION}'); "
+            "rows=["
+            "{'suite': name, 'task_id': task_id, 'prompt': task.PROMPT} "
+            "for name, suite in sorted(suites.items()) "
+            "for task_id, task in sorted(suite.user_tasks.items())]; "
+            "Path(sys.argv[1]).write_text(''.join(json.dumps(r)+'\\n' for r in rows))"
+        )
+    elif benchmark == "appworld":
+        code = (
+            "import json,sys; from pathlib import Path; "
+            "from appworld.task import load_task_ids; "
+            "rows=[]; "
+            "rows += [{'task_id': i, 'dataset': 'train', 'partition': 'train'} "
+            "for i in load_task_ids('train')]; "
+            "rows += [{'task_id': i, 'dataset': 'dev', 'partition': 'train'} "
+            "for i in load_task_ids('dev')]; "
+            "rows += [{'task_id': i, 'dataset': 'test_normal', 'partition': 'test'} "
+            "for i in load_task_ids('test_normal')]; "
+            "rows += [{'task_id': i, 'dataset': 'test_challenge', 'partition': 'excluded'} "
+            "for i in load_task_ids('test_challenge')]; "
+            "Path(sys.argv[1]).write_text(''.join(json.dumps(r)+'\\n' for r in rows))"
+        )
+    elif benchmark == "scienceworld":
+        temporary = target.with_suffix(".tmp")
+        try:
+            run(
+                [
+                    python,
+                    Path(__file__).with_name("export_scienceworld.py"),
+                    temporary,
+                ]
+            )
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return
+    elif benchmark == "bird":
+        _export_bird(target)
+        return
+    else:
+        raise ValueError("Unknown task export: " + benchmark)
     temporary = target.with_suffix(".tmp")
     try:
-        run([python, "-c", code, temporary])
+        run([python, "-c", code, temporary], env=env)
         temporary.replace(target)
     finally:
         temporary.unlink(missing_ok=True)
 
 
+def prepare_appworld_data(python):
+    root = ROOT / "raw/appworld-root"
+    data = root / "data"
+    if data.is_dir() and (data / "datasets" / "train.txt").is_file():
+        print(f"Reusing AppWorld data: {data}", flush=True)
+        return root
+    root.mkdir(parents=True, exist_ok=True)
+    archive = ROOT / "raw/downloads/data-0.1.0.bundle"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    if not archive.exists():
+        download = archive.with_suffix(".tmp")
+        run(["curl", "-fsSL", APPWORLD_DATA_URL, "-o", download])
+        download.replace(archive)
+    if hashlib.sha256(archive.read_bytes()).hexdigest() != APPWORLD_DATA_SHA256:
+        raise ValueError("AppWorld data bundle checksum mismatch: " + str(archive))
+    run(
+        [
+            python,
+            "-c",
+            (
+                "import os, shutil, sys; "
+                "from pathlib import Path; "
+                "from appworld.common.constants import PASSWORD, SALT; "
+                "from appworld.common.utils import unpack_bundle; "
+                "root=Path(sys.argv[1]); data=root/'data'; "
+                "shutil.rmtree(data, ignore_errors=True); "
+                "os.environ['APPWORLD_ROOT']=str(root); "
+                "unpack_bundle(sys.argv[2], str(root), PASSWORD, SALT); "
+                "assert (data/'datasets'/'train.txt').is_file()"
+            ),
+            root,
+            archive,
+        ],
+        env={**os.environ, "APPWORLD_ROOT": str(root)},
+    )
+    return root
+
+
+def file_hash(path):
+    with Path(path).open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def _download(url, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        return
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    run(["curl", "-fL", "--retry", "3", "-o", temporary, url])
+    temporary.replace(path)
+
+
+def _export_bird(target):
+    directory = ROOT / "raw/bird/annotations"
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, (url, checksum) in BIRD_ANNOTATIONS.items():
+        path = directory / name
+        _download(url, path)
+        if file_hash(path) != checksum:
+            raise ValueError("BIRD annotation checksum mismatch: " + str(path))
+    rows = []
+    for partition, filename in (
+        ("train", "train.jsonl"),
+        ("test", "mini_dev_sqlite.jsonl"),
+    ):
+        for index, row in enumerate(read_rows(directory / filename)):
+            task_id = (
+                f"train-{index}"
+                if partition == "train"
+                else f"mini-{row['question_id']}"
+            )
+            rows.append(
+                {
+                    "task_id": task_id,
+                    "domain": row["db_id"],
+                    "partition": partition,
+                    "db_id": row["db_id"],
+                    "question": row["question"],
+                    "evidence": row.get("evidence") or "",
+                    "SQL": row["SQL"],
+                }
+            )
+    target.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    print(f"exported {len(rows)} bird tasks", flush=True)
+
+
+def prepare_bird_databases():
+    """Unpack the official train and dev SQLite files. Mini-Dev uses the dev files."""
+    root = ROOT / "raw/bird/databases"
+    if root.is_dir() and any(root.rglob("*.sqlite")):
+        print(f"Reusing BIRD databases: {root}", flush=True)
+        return
+    downloads = ROOT / "raw/downloads"
+    archives = {
+        "bird-train.zip": (
+            BIRD_TRAIN_ZIP,
+            "train/train_databases.zip",
+            "bird-train-databases.zip",
+        ),
+        "bird-dev.zip": (
+            BIRD_DEV_ZIP,
+            "dev_20240627/dev_databases.zip",
+            "bird-dev-databases.zip",
+        ),
+    }
+    root.mkdir(parents=True, exist_ok=True)
+    for name, (size, member, inner_name) in archives.items():
+        outer = downloads / name
+        if not outer.is_file() or outer.stat().st_size != size:
+            raise ValueError(
+                f"Missing {outer} ({size} bytes). "
+                "Train: https://bird-bench.oss-cn-beijing.aliyuncs.com/train.zip "
+                "Dev: https://bird-bench.oss-cn-beijing.aliyuncs.com/dev.zip"
+            )
+        inner = downloads / inner_name
+        if not inner.is_file():
+            with (
+                zipfile.ZipFile(outer) as package,
+                package.open(member) as src,
+                inner.open("wb") as out,
+            ):
+                shutil.copyfileobj(src, out)
+        with zipfile.ZipFile(inner) as package:
+            members = [
+                item
+                for item in package.namelist()
+                if not item.startswith("__MACOSX") and "/._" not in item
+            ]
+            package.extractall(root, members)
+    if not any(root.rglob("*.sqlite")):
+        raise ValueError("BIRD database archives contained no sqlite files")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--benchmark", choices=["tau2", "swe", "web", "all"], default="all"
+        "--benchmark",
+        choices=[
+            "tau2",
+            "swe",
+            "agentdojo",
+            "appworld",
+            "scienceworld",
+            "bird",
+            "all",
+        ],
+        default="all",
     )
     args = parser.parse_args(argv)
     if not shutil.which("uv"):
@@ -196,25 +400,40 @@ def main(argv=None):
         mini, swe = source("mini"), source("swe")
         python = install_runtime("swe", [*common, f"-e {mini}", f"-e {swe}"])
         export_tasks(python, "swebench_verified")
-    if args.benchmark in ("web", "all"):
-        arb, browser = source("arb"), source("browser")
+    if args.benchmark in ("agentdojo", "all"):
+        agentdojo = source("agentdojo")
+        python = install_runtime("agentdojo", [*common, f"-e {agentdojo}"])
+        export_tasks(python, "agentdojo")
+    if args.benchmark in ("appworld", "all"):
+        appworld = source("appworld")
+        # AppWorld pins pydantic v1; keep this runtime isolated from the v2 common set.
         python = install_runtime(
-            "web",
-            [
-                *common,
-                "setuptools==80.9.0",
-                "openai>=1.66.0",
-                "flask>=3",
-                "browsergym==0.13.1",
-                f"-e {arb}",
-            ],
+            "appworld",
+            [f"-e {appworld}", "jinja2==3.1.6", "openai==1.66.0"],
         )
         run(
-            [python, "-m", "playwright", "install", "chromium"],
-            env={**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(ROOT / "raw/browsers")},
+            [
+                python,
+                "-c",
+                "from appworld.install import install_package; install_package()",
+            ]
         )
-        export_tasks(python, "agentrewardbench")
-        assert (browser / "demo_agent/agent.py").is_file()
+        root = prepare_appworld_data(python)
+        export_tasks(
+            python,
+            "appworld",
+            env={**os.environ, "APPWORLD_ROOT": str(root)},
+        )
+    if args.benchmark in ("scienceworld", "all"):
+        # ponytail: the published wheel and a bundled JDK, not the Scala checkout.
+        python = install_runtime(
+            "scienceworld", [*common, "scienceworld==1.2.3", "jdk4py"]
+        )
+        export_tasks(python, "scienceworld")
+    if args.benchmark in ("bird", "all"):
+        python = install_runtime("bird", common)
+        prepare_bird_databases()
+        export_tasks(python, "bird")
     print(
         "Native runtimes prepared. Run scripts/experiment.sh NAME doctor before collecting trajectories."
     )

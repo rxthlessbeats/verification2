@@ -1,7 +1,6 @@
 """Freeze each benchmark's train/test split before solver outcomes or prompt development."""
 
 import argparse
-import ast
 import hashlib
 import json
 import random
@@ -12,7 +11,12 @@ from typing import Literal, get_args
 
 from pydantic import Field, model_validator
 
-from ..benchmarks.setup import ROOT
+from qera.jsonl import read as read_rows
+
+from ..benchmarks.setup import (
+    ROOT,
+    file_hash,  # noqa: F401 - retained for existing split module callers.
+)
 from ..core.config import Benchmark, Domain, Name, Settings
 
 BENCHMARKS = get_args(Benchmark)
@@ -26,15 +30,10 @@ def digest(value):
     ).hexdigest()
 
 
-def file_hash(path):
-    with Path(path).open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
 class Task(Settings):
     benchmark: Benchmark
     task_id: Name
-    domain: Domain | None = None
+    domain: Name | None = None  # tau2 domain or AgentDojo suite; optional elsewhere
     source: Path
     source_row_hash: Name
     partition: Literal["train", "test", "pilot"] | None = None
@@ -80,72 +79,8 @@ class Split(Settings):
         return self
 
 
-def model_free_web_task(config):
-    """Accept only audited native evaluator paths; unknown paths are ineligible."""
-    evaluation = config.get("eval", {})
-    kinds = evaluation.get("eval_types", [])
-    if not kinds or not set(kinds) <= {"string_match", "url_match", "program_html"}:
-        return False
-    answers = evaluation.get("reference_answers") or {}
-    if not set(answers) <= {"exact_match", "must_include"}:
-        return (
-            False  # Includes fuzzy matching and conditional unachievable-task judging.
-        )
-    helpers = {
-        "shopping_get_latest_order_url",
-        "shopping_get_sku_latest_review_author",
-        "shopping_get_sku_latest_review_rating",
-        "reddit_get_post_url",
-        "gitlab_get_project_memeber_role",
-    }
-    for item in evaluation.get("program_html", []):
-        if not set(item.get("required_contents", {})) <= {
-            "exact_match",
-            "must_include",
-        }:
-            return False
-        for value in (item.get("url", ""), item.get("locator", "")):
-            if isinstance(value, str) and value.startswith("func:"):
-                try:
-                    tree = ast.parse(value[5:], mode="eval")
-                except SyntaxError:
-                    return False
-                if not isinstance(tree.body, ast.Call) or any(
-                    not isinstance(
-                        node,
-                        (
-                            ast.Expression,
-                            ast.Call,
-                            ast.Name,
-                            ast.Load,
-                            ast.Constant,
-                            ast.keyword,
-                        ),
-                    )
-                    for node in ast.walk(tree)
-                ):
-                    return False
-                if any(
-                    isinstance(node, ast.Call)
-                    and (
-                        not isinstance(node.func, ast.Name)
-                        or node.func.id not in helpers
-                    )
-                    for node in ast.walk(tree)
-                ):
-                    return False
-    return True
-
-
-def read_rows(path):
-    with Path(path).open(encoding="utf-8") as stream:
-        for line in stream:
-            if line.strip():
-                yield json.loads(line)
-
-
 def task_pool(benchmark):
-    """Eligible native tasks; tau2 tasks carry the benchmark's own train/test split."""
+    """Eligible native tasks; tau2/AppWorld carry their own train/test split."""
     result, excluded = [], []
     if benchmark == "tau2_bench":
         for domain in DOMAINS:
@@ -166,29 +101,53 @@ def task_pool(benchmark):
                         )
                     )
         return result, excluded
+    if benchmark == "appworld":
+        path = ROOT / "raw/tasks/appworld.jsonl"
+        if not path.exists():
+            raise ValueError(f"Native task inputs missing: {path}; run make setup")
+        for row in read_rows(path):
+            partition = row.get("partition")
+            if partition not in ("train", "test"):
+                excluded.append(
+                    {
+                        "task_id": row["task_id"],
+                        "reason": "excluded AppWorld split (e.g. test_challenge)",
+                    }
+                )
+                continue
+            result.append(
+                Task(
+                    benchmark=benchmark,
+                    task_id=row["task_id"],
+                    source=path.relative_to(ROOT),
+                    source_row_hash=digest(row),
+                    partition=partition,
+                )
+            )
+        return result, excluded
     path = ROOT / "raw/tasks" / (benchmark + ".jsonl")
     if not path.exists():
         raise ValueError(f"Native task inputs missing: {path}; run make setup")
     for row in read_rows(path):
-        identifier = (
-            row.get("instance_id")
-            if benchmark == "swebench_verified"
-            else "webarena." + str(row["task_id"])
-        )
-        if benchmark == "agentrewardbench" and not model_free_web_task(row):
-            excluded.append(
-                {
-                    "task_id": identifier,
-                    "reason": "native scorer requires a model or an unaudited evaluator path",
-                }
-            )
-            continue
+        if benchmark == "swebench_verified":
+            identifier = row.get("instance_id")
+            domain = None
+        elif benchmark == "agentdojo":
+            identifier = row["task_id"]
+            domain = row["suite"]
+        elif benchmark in ("scienceworld", "bird"):
+            identifier = row["task_id"]
+            domain = row.get("domain")
+        else:
+            raise ValueError("No native task pool for " + benchmark)
         result.append(
             Task(
                 benchmark=benchmark,
                 task_id=identifier,
+                domain=domain,
                 source=path.relative_to(ROOT),
                 source_row_hash=digest(row),
+                partition=row.get("partition"),
             )
         )
     return result, excluded
@@ -202,21 +161,27 @@ def load_task(task):
         else read_rows(path)
     )
     for row in rows:
-        identifier = (
-            str(row.get("id"))
-            if task.benchmark == "tau2_bench"
-            else row.get("instance_id")
-            if task.benchmark == "swebench_verified"
-            else "webarena." + str(row["task_id"])
-        )
+        if task.benchmark == "tau2_bench":
+            identifier = str(row.get("id"))
+        elif task.benchmark == "swebench_verified":
+            identifier = row.get("instance_id")
+        elif task.benchmark == "agentdojo":
+            # The same user_task_N exists in every suite.
+            if row.get("suite") != task.domain:
+                continue
+            identifier = row.get("task_id")
+        elif task.benchmark == "appworld":
+            identifier = row.get("task_id")
+        elif task.benchmark in ("scienceworld", "bird"):
+            if row.get("domain") != task.domain:
+                continue
+            identifier = row.get("task_id")
+        else:
+            raise ValueError("No native task id for " + task.benchmark)
         if identifier == task.task_id:
             if digest(row) != task.source_row_hash:
                 raise ValueError(
                     "Native task data changed after the split was frozen: " + task.key
-                )
-            if task.benchmark == "agentrewardbench" and not model_free_web_task(row):
-                raise ValueError(
-                    "Model-based/unknown native web scoring is not eligible"
                 )
             return row
     raise ValueError("Frozen native task is missing: " + task.key)
@@ -235,7 +200,7 @@ def make_split(benchmark, pool, excluded=()):
     for key in sorted(strata):
         rows = strata[key]
         random.Random(f"{SEED}:{benchmark}:{key}").shuffle(rows)
-        if benchmark != "tau2_bench":
+        if any(task.partition is None for task in rows):
             # Odd domains take turns starting with test, so train is half, rounded down.
             first = 1 if len(rows) % 2 and odd % 2 == 0 else 0
             odd += len(rows) % 2
@@ -247,6 +212,12 @@ def make_split(benchmark, pool, excluded=()):
     method = (
         "native tau2 split_tasks.json train/test"
         if benchmark == "tau2_bench"
+        else "native AppWorld train+dev / test_normal"
+        if benchmark == "appworld"
+        else "native ScienceWorld train+dev / test variations"
+        if benchmark == "scienceworld"
+        else "native BIRD train / Mini-Dev"
+        if benchmark == "bird"
         else "seeded 50/50 within domain"
     )
     return Split(

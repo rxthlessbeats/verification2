@@ -7,16 +7,23 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from qera.jsonl import read_jsonl
+from qera.render import CONDITIONS
 
 from ..agents import classification, selection
 from ..agents import verifier as pipeline
 from ..benchmarks.doctor import check
 from ..core.prompts import load_prompts
 from ..core.registry import resolve
-from ..data.split import BENCHMARKS, digest, file_hash, load_split, split_id
+from ..data.split import BENCHMARKS, digest, file_hash, load_split, select, split_id
 from . import summary
 from .collection import add_limits, collect
-from .protocol import check_heldout, check_pilot, code_hash, runtime_hashes
+from .protocol import (
+    check_heldout,
+    check_pilot,
+    code_hash,
+    runtime_hashes,
+    solver_prompt_hash,
+)
 from .report import main as report
 from .store import add_rerun, rerun_benchmarks
 
@@ -30,21 +37,34 @@ def main(argv=None):
     )
     parser.add_argument("--prompt-file", type=Path)
     parser.add_argument("--cache-dir", type=Path)
-    parser.add_argument("--conditions", nargs="+", default=["QERA"])
+    parser.add_argument(
+        "--stage", choices=["all", "solver", "jev", "verifier"], default="all"
+    )
+    parser.add_argument("--conditions", nargs="+", choices=CONDITIONS, default=["QERA"])
     parser.add_argument("--protocol", type=Path)
     parser.add_argument("--retry-failed", action="store_true")
     add_limits(parser)
     add_rerun(parser)
     args = parser.parse_args(argv)
+    if len(set(args.conditions)) != len(args.conditions):
+        parser.error("Duplicate views")
     rerun = rerun_benchmarks(args.rerun)
     splits = [load_split(b) for b in args.benchmarks]
     prompts = load_prompts(args.prompt_file)
     solver = resolve("solver", os.environ.get("SOLVER_MODEL"))
-    check_heldout(splits, args.partition, args.protocol, solver, prompts)
+    frozen = check_heldout(splits, args.partition, args.protocol, solver, prompts)
+    if (
+        frozen
+        and args.stage in ("all", "verifier")
+        and not set(args.conditions).issubset(frozen.conditions)
+    ):
+        parser.error("Requested views exceed the frozen test protocol")
     args.output.mkdir(parents=True, exist_ok=True)
-    report_path = args.output / "report.json"
+    report_name = "report.json" if args.stage == "all" else f"{args.stage}-report.json"
+    report_path = args.output / report_name
     result = {
         "status": "running",
+        "stage": args.stage,
         "split_id": split_id(splits),
         "partition": args.partition,
         "source_hash": code_hash(),
@@ -71,6 +91,10 @@ def main(argv=None):
             if previous["code"] == 0 or not args.retry_failed:
                 result["stages"][name] = previous
                 return path if path.exists() else None
+        if args.stage == "verifier" and name != "verifier":
+            raise ValueError(
+                f"Run STAGE=jev first for the selected settings. Missing {name} artifact."
+            )
         suffix = 0
         output = args.output / name
         while output.exists():
@@ -93,7 +117,17 @@ def main(argv=None):
 
     save()
     try:
-        readiness = check(network=True, benchmarks=args.benchmarks)
+        collect_solver = args.stage in ("all", "solver")
+        roles = (
+            ("SOLVER", "JEV", "VERIFIER")
+            if args.stage == "all"
+            else (args.stage.upper(),)
+        )
+        readiness = check(
+            network=True,
+            benchmarks=args.benchmarks if collect_solver else (),
+            roles=roles,
+        )
         (args.output / "readiness.json").write_text(
             json.dumps(readiness, indent=2) + "\n"
         )
@@ -104,29 +138,79 @@ def main(argv=None):
             )
             return 2
         if args.partition != "pilot":
-            check_pilot(args.output.parent / "pilot/report.json", splits)
+            pilot = args.output.parent / "pilot"
+            checkpoint = pilot / report_name
+            if not checkpoint.exists():
+                checkpoint = pilot / "report.json"
+            if not checkpoint.exists() and args.stage == "all":
+                checkpoint = pilot / "verifier-report.json"
+            check_pilot(checkpoint, splits)
         solver_dir = args.output / "solver"
-        collected = collect(
-            splits,
-            solver_dir,
-            args.partition,
-            solver.model,
-            solver.endpoint,
-            backend="http",
-            cache_dir=cache,
-            prompt_file=args.prompt_file,
-            retry_failed=args.retry_failed,
-            rerun=rerun,
-            limit=args.limit,
-            jobs=args.jobs,
-            reasoning_effort=solver.reasoning_effort,
-        )
+        if collect_solver:
+            collected = collect(
+                splits,
+                solver_dir,
+                args.partition,
+                solver.model,
+                solver.endpoint,
+                backend="http",
+                cache_dir=cache,
+                prompt_file=args.prompt_file,
+                retry_failed=args.retry_failed,
+                rerun=rerun,
+                limit=args.limit,
+                jobs=args.jobs,
+                reasoning_effort=solver.reasoning_effort,
+            )
+        else:
+            manifest_path = solver_dir / "manifest.json"
+            if not manifest_path.is_file():
+                raise ValueError("Run STAGE=solver first in this experiment folder")
+            manifest = json.loads(manifest_path.read_text())
+            config = manifest["configuration"]
+            if (
+                config["split_id"] != result["split_id"]
+                or config["partition"] != args.partition
+                or config["mode"] != "http"
+                or config["source_hash"] != result["source_hash"]
+                or config["runtime_hashes"] != result["runtime_hashes"]
+                or config["solver_model"] != solver.model
+                or config["solver_endpoint"] != solver.endpoint
+                or config.get("solver_reasoning_effort") != solver.reasoning_effort
+            ):
+                raise ValueError("Saved solver configuration differs from this run")
+            collected = int(not manifest["complete"])
         source = solver_dir / "trajectories.jsonl"
         if not source.exists():
             raise ValueError(
                 "No successfully scored native episodes; raw failures were preserved"
             )
         trajectories = list(read_jsonl([source]))
+        if not collect_solver:
+            if (
+                manifest.get("trajectories_sha256")
+                and file_hash(source) != manifest["trajectories_sha256"]
+            ):
+                raise ValueError("Saved solver trajectories were modified")
+            prompt_hash = solver_prompt_hash(prompts)
+            expected_tasks = {t.key for t in select(splits, args.partition, args.limit)}
+            keys = {t.meta.get("native_task_key") for t in trajectories}
+            if (
+                manifest["planned_n"] != len(expected_tasks)
+                or not keys <= expected_tasks
+                or len(keys) != len(trajectories)
+                or len(keys) != manifest["completed_n"]
+                or (not collected and keys != expected_tasks)
+                or any(
+                    t.meta.get("solver_prompt_hash") != prompt_hash
+                    or t.split != args.partition
+                    or t.meta.get("split_id") != result["split_id"]
+                    for t in trajectories
+                )
+            ):
+                raise ValueError(
+                    "Saved solver trajectories differ from the requested task selection"
+                )
         if args.partition == "pilot":
             expected = set(args.benchmarks)
             captured = {
@@ -144,6 +228,9 @@ def main(argv=None):
                 raise ValueError(
                     "Pilot needs a completed native episode with captured readable reasoning for every benchmark"
                 )
+        if args.stage == "solver":
+            result.update(status="partial" if collected else "passed")
+            return collected
         jev_model = os.environ.get("JEV_MODEL")
         jev_endpoint = resolve("jev", jev_model).endpoint
         classified = stage(
@@ -214,6 +301,10 @@ def main(argv=None):
             )
             if classified is None:
                 raise ValueError("No validated Jev selections were published")
+        if args.stage == "jev":
+            failed = collected or any(s["code"] for s in result["stages"].values())
+            result.update(status="partial" if failed else "passed")
+            return int(bool(failed))
         verifier = resolve("verifier", os.environ.get("VERIFIER_MODEL"))
         model, endpoint = verifier.model, verifier.endpoint
         verified = stage(
@@ -239,7 +330,7 @@ def main(argv=None):
                     model=model,
                     endpoint=endpoint,
                     reasoning_effort=verifier.reasoning_effort,
-                    timeout=None,
+                    timeout=300,
                     max_tokens=None,
                     cache_dir=cache,
                     prompt_file=args.prompt_file,

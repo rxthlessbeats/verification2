@@ -38,6 +38,11 @@ def identity(task, model, seed, solver_prompt, runtime_hashes, reasoning_effort=
         "benchmark": task.benchmark,
         "task": task.key,
         "source_row_hash": task.source_row_hash,
+        **(
+            {"collector_version": 2}
+            if task.benchmark in ("scienceworld", "bird")
+            else {}
+        ),
         "solver_model": model,
         "solver_prompt_hash": digest(solver_prompt),
         "seed": seed,
@@ -73,7 +78,12 @@ def load(store, key):
         raise ValueError(
             "Stored trajectory does not match its entry: " + str(directory)
         )
-    return directory, entry, Trajectory.model_validate_json(trajectory.read_text())
+    episode = Trajectory.model_validate_json(trajectory.read_text())
+    if episode.benchmark == "appworld":
+        from qera.adapters.appworld import protect_python_actions
+
+        protect_python_actions(episode)
+    return directory, entry, episode
 
 
 def unlabelled(trajectory):
