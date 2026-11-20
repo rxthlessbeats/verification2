@@ -26,6 +26,7 @@ Commands:
 
 Options:
   --output DIR          experiment folder (default outputs/NAME)
+  --stage ROLE          all (default), solver, jev, or verifier
   --conditions "A B"    verifier views for train and test
   --rerun "A B" | all   solve these benchmarks' stored trajectories again
                         (use a new --output)
@@ -62,13 +63,15 @@ ARGS=("$@")
 OUTPUT=outputs/$NAME
 PROMPTS=src/verification2/core/prompts.yaml
 STEPS=()
+STAGE=all
 CONDITIONS= RERUN= RETRY= TRAIN= TEST= JOBS= BENCHMARKS= DETACH=0
 while (($#)); do
   case $1 in
     doctor | pilot | train | freeze | test | status | stop) STEPS+=("$1") ;;
-    --output | --conditions | --rerun | --prompts | --train | --test | --jobs | --benchmarks)
+    --output | --stage | --conditions | --rerun | --prompts | --train | --test | --jobs | --benchmarks)
       [[ $# -ge 2 && -n $2 ]] || die "$1 needs a value"
       case $1 in
+        --stage) STAGE=$2 ;;
         --output) OUTPUT=${2%/} ;;
         --conditions) CONDITIONS=$2 ;;
         --rerun) RERUN=$2 ;;
@@ -87,6 +90,13 @@ while (($#)); do
   esac
   shift
 done
+case $STAGE in all|solver|jev|verifier) ;; *) die "Unknown stage: $STAGE" ;; esac
+seen=" "
+for view in $CONDITIONS; do
+  case $view in QA|QEA|QRA|QERA|QJevA) ;; *) die "Unknown view: $view" ;; esac
+  [[ $seen != *" $view "* ]] || die "Duplicate view: $view"
+  seen+="$view "
+done
 for value in "$TRAIN" "$TEST" "$JOBS"; do
   [[ -z $value || $value == all || $value =~ ^[1-9][0-9]*$ ]] || die "Expected a positive number or all: $value"
 done
@@ -96,9 +106,7 @@ LOG=$OUTPUT/run.log
 LOCK=$OUTPUT/run.lock
 HINT="scripts/experiment.sh $NAME"
 [[ $OUTPUT == "outputs/$NAME" ]] || HINT+=" --output $OUTPUT"
-UV=(uv run --no-cache)
-[[ -f raw/websites/.env ]] && UV+=(--env-file raw/websites/.env)
-UV+=(--env-file .env)
+UV=(uv run --no-cache --env-file .env)
 export PYTHONUNBUFFERED=1
 
 doctor_step() {
@@ -123,7 +131,9 @@ freeze_step() {
 partition_step() {
   local limit= args=(--benchmarks $BENCHMARKS --partition "$1" --output "$OUTPUT/$1" --prompt-file "$PROMPTS"
     --cache-dir "$OUTPUT/api_cache")
+  [[ $STAGE == all ]] || args+=(--stage "$STAGE")
   case $1 in
+    pilot) [[ $STAGE == all || -z $CONDITIONS ]] || args+=(--conditions $CONDITIONS) ;;
     train) args+=(--conditions ${CONDITIONS:-QERA}) limit=$TRAIN ;;
     test) args+=(--conditions ${CONDITIONS:-QA QEA QRA QERA} --protocol "$OUTPUT/protocol.json") limit=$TEST ;;
   esac

@@ -134,14 +134,68 @@ def fresh_splits(tmp_path, monkeypatch):
         (directory / "split_tasks.json").write_text(json.dumps(native))
     tasks = tmp_path / "raw/tasks"
     tasks.mkdir(parents=True)
-    rows = [
-        {"instance_id": str(i), "task_id": i, "eval": {"eval_types": ["url_match"]}}
-        for i in range(2)
-    ]
-    for benchmark in ("swebench_verified", "agentrewardbench"):
-        (tasks / (benchmark + ".jsonl")).write_text(
-            "".join(json.dumps(r) + "\n" for r in rows)
+    (tasks / "swebench_verified.jsonl").write_text(
+        "".join(
+            json.dumps({"instance_id": str(i), "task_id": i}) + "\n" for i in range(2)
         )
+    )
+    (tasks / "agentdojo.jsonl").write_text(
+        "".join(
+            json.dumps(
+                {
+                    "suite": "workspace",
+                    "task_id": f"user_task_{i}",
+                    "prompt": f"Do task {i}",
+                }
+            )
+            + "\n"
+            for i in range(2)
+        )
+    )
+    (tasks / "scienceworld.jsonl").write_text(
+        "".join(
+            json.dumps(
+                {
+                    "task_id": str(i),
+                    "domain": "boil",
+                    "partition": "train" if i == 0 else "test",
+                    "simplification": "easy",
+                }
+            )
+            + "\n"
+            for i in range(2)
+        )
+    )
+    (tasks / "bird.jsonl").write_text(
+        "".join(
+            json.dumps(
+                {
+                    "task_id": f"train-{i}" if i == 0 else f"mini-{i}",
+                    "domain": "movie",
+                    "partition": "train" if i == 0 else "test",
+                    "db_id": "movie",
+                    "question": "Who directed it?",
+                    "evidence": "",
+                    "SQL": "SELECT director FROM movies",
+                }
+            )
+            + "\n"
+            for i in range(2)
+        )
+    )
+    (tasks / "appworld.jsonl").write_text(
+        "".join(
+            json.dumps(
+                {
+                    "task_id": f"task_{i}",
+                    "dataset": "train" if i == 0 else "test_normal",
+                    "partition": "train" if i == 0 else "test",
+                }
+            )
+            + "\n"
+            for i in range(2)
+        )
+    )
     monkeypatch.setattr(split, "ROOT", tmp_path)
     monkeypatch.setenv("SOLVER_MODEL", "test-model")
     return [split.load_split(b) for b in split.BENCHMARKS]
@@ -156,7 +210,7 @@ def solve(splits, output, partition="pilot", **options):
 def fake_native_episode(job, *args):
     job.output.mkdir(parents=True)
     builder = TrajectoryBuilder()
-    builder.add("Q", "user", "question", "Complete task " + job.task.task_id)
+    builder.add("Q", "user", "question", "Complete task " + job.task.key)
     builder.add("E", "environment", "observation", "Observed tool result.")
     builder.add(
         "R",
@@ -166,12 +220,13 @@ def fake_native_episode(job, *args):
         source_id="api/reasoning_content",
     )
     builder.add("A", "solver", "final_answer", "Candidate output.")
+    tool_use = job.task.benchmark != "swebench_verified"
     return builder.build(
         traj_id=job.task.key,
         benchmark=job.task.benchmark,
-        domain="tool_use" if job.task.benchmark == "tau2_bench" else "software_web",
+        domain="tool_use" if tool_use else "software_web",
         task_id=f"{job.task.domain}/{job.task.task_id}"
-        if job.task.benchmark == "tau2_bench"
+        if job.task.domain
         else job.task.task_id,
         solver=SolverInfo(
             model=job.model, origin="self_generated", native_reasoning="full"
@@ -179,7 +234,7 @@ def fake_native_episode(job, *args):
         label=Label(
             correct=True,
             source="unit_tests"
-            if job.task.benchmark == "swebench_verified"
+            if job.task.benchmark in ("swebench_verified", "appworld", "bird")
             else "env_reward",
         ),
     )

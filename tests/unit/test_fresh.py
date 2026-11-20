@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -5,12 +6,6 @@ import pytest
 
 from qera.render import build_verifier_input
 from tests.support import CHAT, _toy, configure
-from verification2.benchmarks.web_worker import (
-    api_only_stats,
-    convert_steps,
-    guard_navigation,
-    narration,
-)
 from verification2.core.prompts import load_prompts
 from verification2.core.registry import resolve
 from verification2.data import split
@@ -20,13 +15,12 @@ from verification2.data.split import (
     Task,
     digest,
     load_split,
+    load_task,
     make_split,
-    model_free_web_task,
     select,
     split_id,
 )
 from verification2.experiments import protocol
-from verification2.experiments.collection import Job
 from verification2.experiments.report import analyze
 
 
@@ -38,11 +32,19 @@ def pool():
             task_id=str(i),
             source=Path("native.json"),
             source_row_hash=digest([b, domain, i]),
-            partition=("test" if i < 4 else "train") if b == "tau2_bench" else None,
+            partition=(
+                ("test" if i < 4 else "train")
+                if b in ("tau2_bench", "appworld")
+                else None
+            ),
         )
         for b in BENCHMARKS
         for domain in (
-            ("airline", "retail", "telecom") if b == "tau2_bench" else (None,)
+            ("airline", "retail", "telecom")
+            if b == "tau2_bench"
+            else ("workspace", "banking")
+            if b == "agentdojo"
+            else (None,)
         )
         for i in range(12)
     ]
@@ -124,13 +126,18 @@ def test_splits_freeze_native_or_seeded_halves_and_select_balanced_prefixes(
 ):
     splits = frozen_splits(tmp_path, monkeypatch)
     assert frozen_splits(tmp_path, monkeypatch) == splits
-    assert len(list((tmp_path / "data/splits").glob("*.json"))) == 3
+    assert len(list((tmp_path / "data/splits").glob("*.json"))) == len(BENCHMARKS)
     tau = {t.key: t.partition for t in splits[0].tasks}
     assert tau == {t.key: t.partition for t in pool() if t.benchmark == "tau2_bench"}
     for frozen in splits[1:]:
-        assert len(frozen.tasks) == 12
-        assert sum(t.partition == "train" for t in frozen.tasks) == 6
         rows = [t for t in pool() if t.benchmark == frozen.benchmark]
+        if frozen.benchmark == "appworld":
+            assert len(frozen.tasks) == 12
+            assert sum(t.partition == "train" for t in frozen.tasks) == 8
+            assert make_split(frozen.benchmark, rows[::-1]) == frozen
+            continue
+        assert len(frozen.tasks) == len(rows)
+        assert sum(t.partition == "train" for t in frozen.tasks) == len(rows) // 2
         assert make_split(frozen.benchmark, rows[::-1]) == frozen
     chosen = select(splits[:1], "train", 5)
     domains = [t.domain for t in chosen]
@@ -154,44 +161,23 @@ def test_splits_freeze_native_or_seeded_halves_and_select_balanced_prefixes(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "evaluation",
-    [
-        {"eval_types": ["unknown"]},
-        {"eval_types": ["string_match"], "reference_answers": {"fuzzy_match": "N/A"}},
-        {
-            "eval_types": ["program_html"],
-            "program_html": [{"url": "func:__import__('os')"}],
-        },
-        {"eval_types": ["program_html"], "program_html": [{"url": "func:(lambda: 1)"}]},
-        {
-            "eval_types": ["program_html"],
-            "program_html": [{"required_contents": {"fuzzy_match": "x"}}],
-        },
-    ],
-)
-def test_native_web_eligibility_rejects_model_based_and_unknown_paths(evaluation):
-    assert not model_free_web_task({"eval": evaluation})
-
-
-@pytest.mark.unit
-def test_known_native_web_scorers_and_timing_do_not_invent_token_counts():
-    assert model_free_web_task(
-        {"eval": {"eval_types": ["url_match"], "reference_url": "http://benchmark/"}}
+def test_agentdojo_load_uses_the_suite_when_task_ids_repeat(tmp_path, monkeypatch):
+    monkeypatch.setattr(split, "ROOT", tmp_path)
+    path = tmp_path / "raw/tasks/agentdojo.jsonl"
+    path.parent.mkdir(parents=True)
+    rows = [
+        {"suite": "banking", "task_id": "user_task_15", "prompt": "banking bill"},
+        {"suite": "slack", "task_id": "user_task_15", "prompt": "slack channel"},
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    task = Task(
+        benchmark="agentdojo",
+        domain="slack",
+        task_id="user_task_15",
+        source=Path("raw/tasks/agentdojo.jsonl"),
+        source_row_hash=digest(rows[1]),
     )
-    assert model_free_web_task(
-        {
-            "eval": {
-                "eval_types": ["string_match"],
-                "reference_answers": {"exact_match": "answer"},
-            }
-        }
-    )
-    step = SimpleNamespace(
-        profiling=SimpleNamespace(env_start=1, env_stop=4, agent_start=5, agent_stop=7)
-    )
-    api_only_stats(step)
-    assert step.stats == {"step_elapsed": 3, "agent_elapsed": 2}
+    assert load_task(task)["prompt"] == "slack channel"
 
 
 @pytest.mark.unit
@@ -268,78 +254,6 @@ def test_macro_weights_benchmarks_equally_and_keeps_absent_classes_null():
         [r for r in rows if r["label_correct"]], ["QERA"], iterations=20
     )
     assert all(r["false_acceptance_rate"] is None for r in summary)
-
-
-@pytest.mark.unit
-def test_web_capture_keeps_the_observed_reasoning_narration_tabs_and_candidate(
-    tmp_path,
-):
-    task = Task(
-        benchmark="agentrewardbench",
-        task_id="webarena.1",
-        source=Path("native.jsonl"),
-        source_row_hash=digest(1),
-    )
-    job = Job(
-        task=task,
-        seed=42,
-        model="solver",
-        endpoint="https://example.invalid/chat/completions",
-        output=tmp_path,
-        cache_dir=tmp_path / "cache",
-    )
-    content = "I will inspect the result.\n```\nclick('12')\n```"
-    left = content.index("click")
-    rest = narration(content, [(left, left + len("click('12')"))])
-    assert rest == "I will inspect the result."
-    obs = {
-        "goal_object": [{"type": "text", "text": "Find the item."}],
-        "open_pages_urls": ["http://shop/item"],
-        "open_pages_titles": ["Item title"],
-        "active_page_index": 0,
-        "axtree_txt": "Item: blue",
-    }
-    first = SimpleNamespace(
-        step=0,
-        obs=obs,
-        action=content,
-        agent_info={
-            "executed_action": "click('12')",
-            "narration": rest,
-            "raw_response": {
-                "choices": [
-                    {
-                        "message": {
-                            "content": content,
-                            "reasoning_text": "API reasoning.",
-                        }
-                    }
-                ]
-            },
-        },
-    )
-    final = SimpleNamespace(
-        step=1, obs=obs | {"axtree_txt": "Result page."}, action=None, agent_info={}
-    )
-    trajectory = convert_steps(job, [first, final], 1, tmp_path / "summary_info.json")
-    assert trajectory.label.correct and trajectory.solver.native_reasoning == "full"
-    assert [s.text for s in trajectory.by_role("R")] == ["API reasoning.", rest]
-    assert [s.text for s in trajectory.by_role("A")] == ["click('12')"]
-    assert (
-        "Title: Item title" in trajectory.by_role("E")[0].text
-        and "(active tab)" in trajectory.by_role("E")[0].text
-    )
-    guard_navigation("goto('https://example.invalid/')")
-    for malformed in ("goto()", "goto(7)"):
-        with pytest.raises(ValueError, match="HTTP"):
-            guard_navigation(malformed)
-    for target in (
-        "file:///etc/passwd",
-        "data:text/plain,secret",
-        "javascript:alert(1)",
-    ):
-        with pytest.raises(ValueError, match="HTTP"):
-            guard_navigation(f"goto({target!r})")
 
 
 @pytest.mark.unit

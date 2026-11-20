@@ -19,7 +19,14 @@ Timeout = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
 Condition = Literal["QERA", "QA", "QEA", "QRA", "QJevA"]
 Mode = Literal["dry-run", "mock", "http"]
 Domain = Literal["airline", "retail", "telecom"]
-Benchmark = Literal["tau2_bench", "swebench_verified", "agentrewardbench"]
+Benchmark = Literal[
+    "tau2_bench",
+    "swebench_verified",
+    "agentdojo",
+    "appworld",
+    "scienceworld",
+    "bird",
+]
 
 
 def http_endpoint(value: str) -> str:
