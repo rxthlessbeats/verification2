@@ -54,6 +54,9 @@ Later verifier invocations can choose a subset of those views.
 Each benchmark has one frozen train/test split in `data/splits/<benchmark>.json`:
 τ² uses its own split (178 train, 100 test). SWE-bench Verified has no official
 split, so all 500 tasks are split 50%/50% (250/250) by a shuffle seeded with 42.
+BIRD keeps every Mini-Dev question and a seed-42 train sample of that size.
+ScienceWorld's full split is a seed-42 sample of 500 train and 500 test
+variations, balanced over task types.
 Each file is written the first time its benchmark is used. `--train N` and
 `--test N` run the first N tasks per benchmark, balanced over domains (default
 all), and a larger N later only adds tasks. The pilot is each benchmark's first

@@ -22,6 +22,7 @@ from ..core.config import Benchmark, Domain, Name, Settings
 BENCHMARKS = get_args(Benchmark)
 DOMAINS = get_args(Domain)
 SEED = 42  # Orders seeded splits and seeds every native solver episode.
+SCIENCEWORLD_TASKS = 500  # Fixed train and test size for ScienceWorld.
 
 
 def digest(value):
@@ -209,14 +210,15 @@ def make_split(benchmark, pool, excluded=()):
                 for i, t in enumerate(rows)
             ]
         tasks.extend(sorted(rows, key=lambda t: t.partition != "train"))
+    tasks, dropped = limit_fixed_splits(benchmark, tasks)
     method = (
         "native tau2 split_tasks.json train/test"
         if benchmark == "tau2_bench"
         else "native AppWorld train+dev / test_normal"
         if benchmark == "appworld"
-        else "native ScienceWorld train+dev / test variations"
+        else f"native ScienceWorld train+dev / test variations; seed-42 sample of {SCIENCEWORLD_TASKS} per partition"
         if benchmark == "scienceworld"
-        else "native BIRD train / Mini-Dev"
+        else "native BIRD train / Mini-Dev; train sample matches the Mini-Dev count"
         if benchmark == "bird"
         else "seeded 50/50 within domain"
     )
@@ -224,8 +226,54 @@ def make_split(benchmark, pool, excluded=()):
         benchmark=benchmark,
         method=f"{method}; task order seeded with {SEED}",
         tasks=tasks,
-        excluded=list(excluded),
+        excluded=[*excluded, *dropped],
     )
+
+
+def sample_partition(tasks, partition, count):
+    """Seeded domain round-robin. Every domain is used before any domain is repeated."""
+    pool = [task for task in tasks if task.partition == partition]
+    if len(pool) <= count:
+        return {task.key for task in pool}
+    strata = defaultdict(list)
+    for task in pool:
+        strata[task.domain or "all"].append(task)
+    picked = []
+    queues = [strata[key] for key in sorted(strata)]
+    for index in range(max(map(len, queues), default=0)):
+        for queue in queues:
+            if index < len(queue) and len(picked) < count:
+                picked.append(queue[index])
+    if len(picked) != count:
+        raise ValueError(f"Could not sample {count} {partition} tasks")
+    return {task.key for task in picked}
+
+
+def limit_fixed_splits(benchmark, tasks):
+    """BIRD matches its train sample to Mini-Dev. ScienceWorld keeps 500 on each side."""
+    if benchmark == "bird":
+        chosen = sample_partition(
+            tasks, "train", sum(task.partition == "test" for task in tasks)
+        )
+        chosen.update(task.key for task in tasks if task.partition == "test")
+        reason = "outside the seed-42 train sample matched to the test count"
+    elif benchmark == "scienceworld":
+        chosen = sample_partition(
+            tasks, "train", SCIENCEWORLD_TASKS
+        ) | sample_partition(tasks, "test", SCIENCEWORLD_TASKS)
+        reason = f"outside the seed-42 sample of {SCIENCEWORLD_TASKS} per partition"
+    else:
+        return tasks, []
+    dropped = [
+        {
+            "task_id": task.task_id,
+            "domain": task.domain or "",
+            "reason": reason,
+        }
+        for task in tasks
+        if task.key not in chosen
+    ]
+    return [task for task in tasks if task.key in chosen], dropped
 
 
 def load_split(benchmark):

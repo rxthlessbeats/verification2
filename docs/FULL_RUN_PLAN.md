@@ -8,7 +8,9 @@ equally; [setup and commands](FRESH_RUN.md) are separate.
 
 τ² uses its own train/test split (178/100). SWE-bench Verified (500 tasks) has
 no official split, so those tasks are split 50%/50% by a shuffle seeded with 42.
-Splits are frozen in
+BIRD keeps every Mini-Dev question and a seed-42 sample of the training questions
+of that same size. ScienceWorld's full split is a seed-42 sample of 500 train
+and 500 test variations. Those samples are the full training splits. Splits are frozen in
 `data/splits/` before any outcome; a run may use the first N tasks of each
 partition, balanced over domains. The pilot is each benchmark's first train task.
 Run one solver episode per task. Never rebalance by solver success.
