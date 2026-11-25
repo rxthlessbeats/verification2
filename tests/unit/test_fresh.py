@@ -161,6 +161,54 @@ def test_splits_freeze_native_or_seeded_halves_and_select_balanced_prefixes(
 
 
 @pytest.mark.unit
+def test_bird_train_sample_matches_the_test_count():
+    tasks = [
+        Task(
+            benchmark="bird",
+            domain=domain,
+            task_id=f"{partition}-{i}",
+            source=Path("native.json"),
+            source_row_hash=digest(["bird", domain, partition, i]),
+            partition=partition,
+        )
+        for partition, count in (("train", 20), ("test", 5))
+        for i in range(count)
+        for domain in (("a", "b")[i % 2],)
+    ]
+    frozen = make_split("bird", tasks[::-1])
+    assert frozen == make_split("bird", tasks)
+    assert sum(t.partition == "train" for t in frozen.tasks) == 5
+    assert sum(t.partition == "test" for t in frozen.tasks) == 5
+    assert {t.domain for t in frozen.tasks if t.partition == "train"} == {"a", "b"}
+    assert len(frozen.excluded) == 15
+
+
+@pytest.mark.unit
+def test_scienceworld_keeps_500_train_and_test(monkeypatch):
+    monkeypatch.setattr(split, "SCIENCEWORLD_TASKS", 4)
+    tasks = [
+        Task(
+            benchmark="scienceworld",
+            domain=domain,
+            task_id=f"{partition}-{i}",
+            source=Path("native.json"),
+            source_row_hash=digest(["scienceworld", domain, partition, i]),
+            partition=partition,
+        )
+        for partition, count in (("train", 20), ("test", 12))
+        for i in range(count)
+        for domain in (("a", "b")[i % 2],)
+    ]
+    frozen = make_split("scienceworld", tasks[::-1])
+    assert frozen == make_split("scienceworld", tasks)
+    assert sum(t.partition == "train" for t in frozen.tasks) == 4
+    assert sum(t.partition == "test" for t in frozen.tasks) == 4
+    assert {t.domain for t in frozen.tasks if t.partition == "train"} == {"a", "b"}
+    assert {t.domain for t in frozen.tasks if t.partition == "test"} == {"a", "b"}
+    assert len(frozen.excluded) == 24
+
+
+@pytest.mark.unit
 def test_agentdojo_load_uses_the_suite_when_task_ids_repeat(tmp_path, monkeypatch):
     monkeypatch.setattr(split, "ROOT", tmp_path)
     path = tmp_path / "raw/tasks/agentdojo.jsonl"

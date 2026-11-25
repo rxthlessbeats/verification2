@@ -10,8 +10,8 @@ hashes and runtime locks are saved with each experiment.
 | [SWE-bench Verified](https://github.com/SWE-bench/SWE-bench) | Issue, repository, command output, submitted patch | Official test harness |
 | [AgentDojo](https://github.com/ethz-spylab/agentdojo) | Suite prompt, tool calls, tool results | Native utility checks (no prompt injections) |
 | [AppWorld](https://github.com/stonybrooknlp/appworld) | Instruction, code executions, API outputs | State-based unit tests |
-| [ScienceWorld](https://github.com/allenai/ScienceWorld) | Task text, commands, simulator replies | Task completion (`getCompleted`), not the 0–100 score |
-| [BIRD Mini-Dev](https://bird-bench.github.io/) | Question, schema, read-only query results | SQLite result-set match; train for development, Mini-Dev held out |
+| [ScienceWorld](https://github.com/allenai/ScienceWorld) | Task text, commands, simulator replies | Task completion (`getCompleted`), not the 0–100 score. The full split is 500 train and 500 test variations |
+| [BIRD Mini-Dev](https://bird-bench.github.io/) | Question, schema, read-only query results | SQLite result-set match. The full train sample matches the Mini-Dev count; Mini-Dev stays held out |
 
 AgentDojo runs the latest `v1.2.2` suites without injection attacks so the label
 is pure task utility. AppWorld uses the official train+dev / test_normal split
